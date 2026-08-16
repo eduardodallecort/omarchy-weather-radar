@@ -35,6 +35,19 @@ standing next to a weather widget supplies the rest. `--section` takes `left`,
 rewrites the widget's entry, so move it before tuning the settings rather than
 after.
 
+### Updating
+
+```bash
+omarchy plugin update eduardodallecort.weather-radar
+omarchy restart shell
+```
+
+The restart is not optional. `omarchy plugin update` fetches the new code and
+asks the shell to rescan, but an already-mounted service is not rebuilt from
+it — the shell logs that it reloaded the plugin while continuing to run the
+version it started with. Until the shell restarts, an update has changed the
+files on disk and nothing else.
+
 ### Removing it
 
 ```bash
