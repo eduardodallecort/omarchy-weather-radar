@@ -1,0 +1,7 @@
+# Editor and OS noise
+*.swp
+*~
+.DS_Store
+
+# Local scratch space for screenshots and experiments that should not ship
+scratch/
