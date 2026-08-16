@@ -234,9 +234,14 @@ Panel {
     onExited: function(exitCode) {
       root.savingLocation = false
       if (exitCode !== 0) return
-      // The service watches the file and will push the new coordinates back
-      // through `radar.location`; recentre on whatever arrives rather than on
-      // what was typed, so the map always agrees with what was stored.
+
+      // Tell the service to re-read rather than waiting for its file watch.
+      // The first location ever written lands in a directory that did not
+      // exist when that watch was set up, so nothing would announce it.
+      if (root.radar && root.radar.reloadLocation) root.radar.reloadLocation()
+
+      // Recentre on whatever arrives from the file rather than on what was
+      // typed, so the map always agrees with what was stored.
       root.panned = false
       root.cancelEditingLocation()
     }

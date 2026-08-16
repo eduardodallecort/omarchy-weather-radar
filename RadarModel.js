@@ -267,6 +267,12 @@ var SAMPLE_RADIUS_KM = 5
 // travel in a single request, so the extra coverage costs a larger response
 // rather than more requests.
 function samplePoints(lat, lon, km) {
+  // Coerce first: a caller holding an unset location would otherwise produce
+  // points carrying null, which only fails later and further away.
+  lat = Number(lat)
+  lon = Number(lon)
+  if (!isFinite(lat) || !isFinite(lon)) return []
+
   var radius = km || SAMPLE_RADIUS_KM
   var dLat = radius / 111.32
   // Longitude degrees shrink towards the poles; without the cosine the
