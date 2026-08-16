@@ -35,6 +35,10 @@ standing next to a weather widget supplies the rest. `--section` takes `left`,
 rewrites the widget's entry, so move it before tuning the settings rather than
 after.
 
+If that second command reports the plugin is unknown, run it again. Installing
+asks the shell to rescan and returns before the shell has finished indexing the
+new directory, so a command issued immediately afterwards can arrive first.
+
 ### Updating
 
 ```bash
