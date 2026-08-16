@@ -267,10 +267,12 @@ var SAMPLE_RADIUS_KM = 5
 // travel in a single request, so the extra coverage costs a larger response
 // rather than more requests.
 function samplePoints(lat, lon, km) {
-  // Coerce first: a caller holding an unset location would otherwise produce
-  // points carrying null, which only fails later and further away.
-  lat = Number(lat)
-  lon = Number(lon)
+  // parseFloat rather than Number, because an unset location carries null and
+  // Number(null) is 0 — a guard built on it would admit the exact case it
+  // exists to reject and place the caller off the coast of west Africa.
+  // parseFloat(null) and parseFloat("") are both NaN, which is what is meant.
+  lat = parseFloat(lat)
+  lon = parseFloat(lon)
   if (!isFinite(lat) || !isFinite(lon)) return []
 
   var radius = km || SAMPLE_RADIUS_KM
