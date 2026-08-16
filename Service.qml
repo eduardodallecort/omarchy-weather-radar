@@ -95,22 +95,32 @@ Item {
     locationFile.reload()
   }
 
-  // Covers the same gap for a file written by something else — the stock
-  // weather widget, or `omarchy-weather-location` run in a terminal. Runs only
-  // while no location is known and stops for good once one is.
+  // Covers the one window the file watch cannot: before any location has ever
+  // been stored the settings directory does not exist, so a file created in it
+  // is invisible. Once the directory exists the watch works — clearing a
+  // location only removes the file — so what is needed is a bridge across the
+  // start of the very first session, not a permanent watchdog.
   //
-  // Having no location is not necessarily brief: clearing it from this panel
-  // removes the file, and committing a typed name with no suggestion chosen
-  // stores a name without coordinates, which is deliberately read as no
-  // location. Either can last a session, and each tick rebuilds the file
-  // watcher as well as reading, so it slows down when nobody is looking at the
-  // map — five seconds while the panel is open, a minute otherwise.
+  // It runs quickly at first and then slowly forever, rather than stopping.
+  // Stopping would strand the machine it exists for: with no directory to
+  // watch, a location chosen an hour later from the stock weather widget or a
+  // terminal would never be seen, while that widget updated live. A read a
+  // minute apart is a file stat, and the burst is never re-armed, because
+  // being without a location is otherwise an ordinary long-lived state —
+  // clearing it from the panel, or storing a typed name with no coordinates —
+  // and re-entering it should not restart rapid polling.
+  property int locationRetries: 0
+  readonly property int locationRetryBurst: 24
+
   Timer {
-    interval: root.frameConsumers > 0 ? 5000 : 60000
+    interval: root.locationRetries < root.locationRetryBurst ? 5000 : 60000
     repeat: true
     running: !root.hasLocation
     triggeredOnStart: true
-    onTriggered: locationFile.reload()
+    onTriggered: {
+      if (root.locationRetries < root.locationRetryBurst) root.locationRetries++
+      locationFile.reload()
+    }
   }
 
   // Identity of the configured place, and the thing "changed" is measured

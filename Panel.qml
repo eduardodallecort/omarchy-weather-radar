@@ -98,8 +98,40 @@ Panel {
   // ---------------------------------------------------------------------------
 
   readonly property bool hasLocation: radar ? radar.hasLocation === true : false
-  readonly property real homeLatitude: hasLocation ? radar.location.latitude : 0
-  readonly property real homeLongitude: hasLocation ? radar.location.longitude : 0
+  // Held rather than bound, so an absent coordinate leaves them alone instead
+  // of becoming a real one. `location` is reassigned a moment before
+  // `hasLocation` catches up, and a binding must yield a number — there is no
+  // way to say "unchanged" — so any binding over that gap would place home at
+  // 0,0, off the coast of west Africa. Updated only from values that parse.
+  property real homeLatitude: 0
+  property real homeLongitude: 0
+  // Deliberately not gated on `hasLocation`. That flag is derived from the same
+  // object and settles a moment later, so requiring it here would discard the
+  // one call that carries the coordinates and leave home at 0,0 for good. The
+  // parse below is the only test that matters: it accepts a usable pair and
+  // ignores everything else.
+  function updateHome() {
+    if (!radar || !radar.location) return
+    var la = parseFloat(radar.location.latitude)
+    var lo = parseFloat(radar.location.longitude)
+    if (!isFinite(la) || !isFinite(lo)) return
+
+    homeLatitude = la
+    homeLongitude = lo
+
+    // Recentre here rather than from a change handler on each coordinate. Such
+    // a handler fires between the two writes, on the new latitude beside the
+    // old longitude — a point that never existed, which the map would centre on
+    // and fetch a full round of tiles for before being corrected.
+    if (!panned) recenter()
+  }
+
+  Connections {
+    target: root.radar
+    function onLocationChanged() { root.updateHome() }
+  }
+
+  onRadarChanged: updateHome()
   readonly property string locationName: radar ? radar.locationName : ""
 
   property real viewLatitude: 0
@@ -112,17 +144,20 @@ Panel {
   readonly property int radarSourceZoom: Math.min(zoom, RadarModel.MAX_RADAR_ZOOM)
   readonly property bool radarUpscaled: zoom > RadarModel.MAX_RADAR_ZOOM
 
-  // True while the view still sits on the configured location, so the
-  // "recentre" affordance only appears once panning has actually moved away.
-  readonly property bool centeredOnHome:
-    Math.abs(viewLatitude - homeLatitude) < 0.0001 && Math.abs(viewLongitude - homeLongitude) < 0.0001
-
   function recenter() {
+    // Nothing to centre on before a location exists; recentring on the
+    // placeholder would move the view to 0,0 rather than leave it alone.
+    if (!hasLocation) return
     viewLatitude = homeLatitude
     viewLongitude = homeLongitude
   }
 
-  onHasLocationChanged: if (hasLocation && !panned) recenter()
+  onHasLocationChanged: {
+    // updateHome recentres itself when it lands a usable pair, and when it
+    // does not the coordinates are unusable anyway — so there is nothing to
+    // add here.
+    updateHome()
+  }
   property bool panned: false
 
   // ---------------------------------------------------------------------------
@@ -182,7 +217,15 @@ Panel {
     persistLocation("", null, null)
   }
 
+  // What the last save asked for, so a save that changes nothing can be told
+  // apart from one that does.
+  property real pendingLatitude: NaN
+  property real pendingLongitude: NaN
+
   function persistLocation(name, latitude, longitude) {
+    pendingLatitude = parseFloat(latitude)
+    pendingLongitude = parseFloat(longitude)
+
     if (name && latitude !== null && longitude !== null)
       locationSaveProc.command = ["omarchy-weather-location", "--set", name, latitude + "," + longitude]
     else if (name)
@@ -235,22 +278,28 @@ Panel {
       root.savingLocation = false
       if (exitCode !== 0) return
 
-      // Tell the service to re-read rather than waiting for its file watch.
-      // The first location ever written lands in a directory that did not
-      // exist when that watch was set up, so nothing would announce it.
+      // Clear `panned` before anything can deliver a location, so the order of
+      // what follows cannot decide whether the map recentres.
+      root.panned = false
+
+      // Recentre now only when what was saved is what home already holds —
+      // re-choosing the stored city, where identical coordinates mean no
+      // property changes and so nothing else would fire. Doing it
+      // unconditionally would snap the map to the previous city first on a
+      // move, and onto the city just removed on a clear.
+      if (isFinite(root.pendingLatitude)
+          && root.pendingLatitude === root.homeLatitude
+          && root.pendingLongitude === root.homeLongitude) root.recenter()
+
+      // Then ask the service to re-read rather than waiting for its file watch.
+      // The first location ever written lands in a directory that did not exist
+      // when that watch was set up, so nothing would announce it. A different
+      // city arrives asynchronously and recentres again.
       if (root.radar && root.radar.reloadLocation) root.radar.reloadLocation()
 
-      // Recentre on whatever arrives from the file rather than on what was
-      // typed, so the map always agrees with what was stored.
-      root.panned = false
       root.cancelEditingLocation()
     }
   }
-
-  // Recentre whenever the stored location changes, including when it was
-  // changed from the stock weather widget rather than from here.
-  onHomeLatitudeChanged: if (!panned) recenter()
-  onHomeLongitudeChanged: if (!panned) recenter()
 
   // ---------------------------------------------------------------------------
   // Frames
@@ -353,6 +402,14 @@ Panel {
   }
 
   property bool manifestHeld: false
+
+  // A bar surface is rebuilt per monitor, so a panel can be destroyed while it
+  // still holds the manifest — unplugging a screen with the map open. Without
+  // this the refcount never comes back down and the service keeps fetching
+  // frames for a panel nobody has.
+  Component.onDestruction: {
+    if (manifestHeld && root.radar && root.radar.releaseManifest) root.radar.releaseManifest()
+  }
 
   function onOpened() {
     if (!panned && hasLocation) recenter()
