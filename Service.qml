@@ -68,6 +68,11 @@ Item {
 
   // Shared with the stock weather widget, which owns the file. Watching it
   // means changing city through the Omarchy menu re-centres the radar live.
+  //
+  // The watch only reaches as far as the containing directory. On a machine
+  // where no weather location was ever set, `~/.local/state/omarchy/settings/`
+  // does not exist, so there is nothing to watch and the file appearing later
+  // is invisible — hence reloadLocation() below and the retry beneath it.
   property var location: ({ name: "", latitude: null, longitude: null, valid: false })
 
   readonly property bool hasLocation: location && location.valid === true
@@ -83,11 +88,21 @@ Item {
     onLoadFailed: root.location = RadarModel.parseLocationFile("")
   }
 
-  // The first read can race shell startup. One delayed reload self-corrects,
-  // and is a no-op when the first read already succeeded.
+  // Re-read the file now rather than waiting to be told about it. Whoever
+  // writes the location calls this immediately afterwards, which is the only
+  // way the first one to exist is ever noticed.
+  function reloadLocation() {
+    locationFile.reload()
+  }
+
+  // Covers the same gap for a file written by something else — the stock
+  // weather widget, or `omarchy-weather-location` run in a terminal. Retries
+  // only while no location is known, and stops for good once one is.
   Timer {
-    interval: 1500
-    running: true
+    interval: root.hasLocation ? 1500 : 5000
+    repeat: !root.hasLocation
+    running: !root.hasLocation
+    triggeredOnStart: true
     onTriggered: locationFile.reload()
   }
 
@@ -280,13 +295,30 @@ Item {
 
   function checkNow() {
     if (!hasLocation || checking) return
+
+    // Read the coordinates once and confirm they are numbers before building a
+    // request out of them. `hasLocation` is derived from a property that other
+    // code reassigns, and a plugin reload landing between the two has been seen
+    // to reach this with nulls; a request built from those would throw rather
+    // than fail.
+    var lat = Number(location.latitude)
+    var lon = Number(location.longitude)
+    if (!isFinite(lat) || !isFinite(lon)) return
+
     checking = true
 
     // Five coordinates rather than one: the centre and four points 5 km out.
     // See RadarModel.samplePoints — the model grid is coarse enough that a
     // stored coordinate speaks for an arbitrary patch beside it rather than
     // for the town it names. They all travel in one request.
-    var points = RadarModel.samplePoints(location.latitude, location.longitude)
+    var points = RadarModel.samplePoints(lat, lon)
+    if (points.length === 0) {
+      // Unreachable given the check above, but a guard that returns without
+      // clearing `checking` would block every later check for the session.
+      checking = false
+      return
+    }
+
     var lats = []
     var lons = []
     for (var i = 0; i < points.length; i++) {
