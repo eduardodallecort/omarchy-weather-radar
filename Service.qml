@@ -96,11 +96,18 @@ Item {
   }
 
   // Covers the same gap for a file written by something else — the stock
-  // weather widget, or `omarchy-weather-location` run in a terminal. Retries
-  // only while no location is known, and stops for good once one is.
+  // weather widget, or `omarchy-weather-location` run in a terminal. Runs only
+  // while no location is known and stops for good once one is.
+  //
+  // Having no location is not necessarily brief: clearing it from this panel
+  // removes the file, and committing a typed name with no suggestion chosen
+  // stores a name without coordinates, which is deliberately read as no
+  // location. Either can last a session, and each tick rebuilds the file
+  // watcher as well as reading, so it slows down when nobody is looking at the
+  // map — five seconds while the panel is open, a minute otherwise.
   Timer {
-    interval: root.hasLocation ? 1500 : 5000
-    repeat: !root.hasLocation
+    interval: root.frameConsumers > 0 ? 5000 : 60000
+    repeat: true
     running: !root.hasLocation
     triggeredOnStart: true
     onTriggered: locationFile.reload()
@@ -299,10 +306,14 @@ Item {
     // Read the coordinates once and confirm they are numbers before building a
     // request out of them. `hasLocation` is derived from a property that other
     // code reassigns, and a plugin reload landing between the two has been seen
-    // to reach this with nulls; a request built from those would throw rather
-    // than fail.
-    var lat = Number(location.latitude)
-    var lon = Number(location.longitude)
+    // to reach this with nulls.
+    //
+    // parseFloat, not Number: an unset location carries null, Number(null) is
+    // 0, and a request built from that would quietly report the weather at
+    // 0°N 0°E — an alert naming no city, about an ocean. Failing loudly beats
+    // answering confidently about the wrong hemisphere.
+    var lat = parseFloat(location.latitude)
+    var lon = parseFloat(location.longitude)
     if (!isFinite(lat) || !isFinite(lon)) return
 
     checking = true
