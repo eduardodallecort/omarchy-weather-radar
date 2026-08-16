@@ -35,6 +35,23 @@ standing next to a weather widget supplies the rest. `--section` takes `left`,
 rewrites the widget's entry, so move it before tuning the settings rather than
 after.
 
+### Removing it
+
+```bash
+omarchy plugin remove eduardodallecort.weather-radar
+```
+
+That deletes the plugin and its entry in the bar. It leaves
+`~/.local/state/omarchy/settings/weather.json` alone, since that file belongs to
+the stock weather widget rather than to this plugin.
+
+### Requirements
+
+Omarchy Quattro, and `curl`, which Omarchy already installs. The plugin calls
+`omarchy-weather-location` to store a chosen city and `omarchy-notification-send`
+to raise an alert — both ship with Omarchy. Nothing else is installed, and no
+configuration outside the widget's own entry is written.
+
 ## The map
 
 ![The radar panel: a map of storms over Oklahoma with distance rings around the location, a timeline scrubber below it, the city name, and the alert controls for radius and threshold](screenshots/panel.webp)
