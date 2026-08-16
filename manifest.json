@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "eduardodallecort.weather-radar",
   "name": "Weather Radar",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "Eduardo Dalle Cort",
   "license": "MIT",
   "description": "Live weather radar map in the Omarchy bar, with optional storm alerts for your location.",
