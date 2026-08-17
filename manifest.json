@@ -36,7 +36,7 @@
         "type": "boolean",
         "label": "Storm alerts",
         "defaultValue": false,
-        "description": "Notify when precipitation is detected within the alert radius. Also toggleable from the panel."
+        "description": "Notify when rain or a storm is forecast to reach you from within the alert radius. Also toggleable from the panel."
       },
       {
         "key": "alertRadiusKm",
@@ -54,7 +54,7 @@
         "label": "Alert threshold",
         "options": ["Light", "Moderate", "Heavy", "Severe"],
         "defaultValue": "Heavy",
-        "description": "Minimum echo intensity worth a notification."
+        "description": "Minimum forecast rain rate worth a notification. Moderate or heavier arriving into an unstable airmass counts one band up, so a storm crosses the threshold sooner than steady rain of the same rate."
       },
       {
         "key": "colorScheme",
@@ -102,7 +102,7 @@
         "type": "boolean",
         "label": "Show status text in bar",
         "defaultValue": false,
-        "description": "Print the nearest echo next to the bar icon. Requires storm alerts to be on, since that is what polls."
+        "description": "Print the outlook next to the bar icon: what is approaching, and when. Requires storm alerts to be on, since what it prints is their forecast."
       }
     ]
   }

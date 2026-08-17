@@ -99,8 +99,8 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    // The label is only meaningful while the service polls; without alerts on
-    // there is nothing fresh to report, so the icon stands alone.
+    // The label prints the alert's own outlook, so with alerts off there is
+    // nothing for it to say and the icon stands alone.
     text: root.showLabel && root.summary !== "" ? root.icon + "  " + root.summary : root.icon
     foreground: root.iconColor
     slotSize: Style.bar.statusSlot
