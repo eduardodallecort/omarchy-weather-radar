@@ -82,6 +82,10 @@ configuration outside the widget's own entry is written.
 | `Home` | recentre on your location |
 | `Esc` | close |
 
+While it is open the map looks for a new frame every ten minutes, which is about
+how often RainViewer publishes one — so the newest frame on screen can be up to
+a cycle behind theirs. Once you close it, the map asks for nothing.
+
 ### What the colours mean
 
 ![Radar over Oklahoma and Texas: blue for light rain grading through yellow and orange to red and magenta cores, over a dark base map](screenshots/map.webp)
@@ -140,10 +144,10 @@ beside each suggestion separates them from their namesakes elsewhere.
 Alerts are **off by default**. Turn them on from the toggle in the panel, or in
 the widget settings.
 
-While on, the plugin checks the forecast every ten minutes — the rate the radar
-publishes new frames, so checking more often would re-fetch bytes that have not
-changed. That is roughly 11 MB a month. With alerts off it makes no background
-requests at all, and fetches only while the map is open.
+While on, the plugin checks the forecast every ten minutes — the forecast model
+does not update any faster, so checking more often would re-fetch bytes that
+have not changed. That is roughly 15 MB a month. With alerts off it makes no
+background requests at all, and fetches only while the map is open.
 
 Two settings shape what reaches you, and they answer different questions. The
 **radius** decides how far ahead to look; the **threshold** decides how bad it

@@ -11,11 +11,12 @@ import "RadarModel.js" as RadarModel
 //
 // Two responsibilities:
 //
-//   1. Own the RainViewer frame manifest, so opening the map does not start
-//      from nothing. It is 818 bytes and is only refreshed while something
-//      actually needs it. The property is `radarManifest` rather than the
-//      obvious `manifest` because the shell assigns the plugin's own
-//      manifest.json to any service exposing a property by that name.
+//   1. Own the RainViewer frame manifest, so that a two-monitor setup showing
+//      the map on both shares one copy instead of fetching one each. It is 818
+//      bytes, and is fetched only while the map is open. The property is
+//      `radarManifest` rather than the obvious `manifest` because the shell
+//      assigns the plugin's own manifest.json to any service exposing a
+//      property by that name.
 //
 //   2. Decide whether to warn about approaching weather, and say so once.
 //
@@ -176,19 +177,59 @@ Item {
     return frame ? frame.time : 0
   }
 
-  // The map calls this while it is open. Refcounted rather than boolean so two
-  // monitors showing the panel do not fight over whether polling should stop.
+  // Whether the newest frame in hand is one RainViewer could still improve on.
+  // Frames publish about every ten minutes, so one younger than that is the
+  // newest that exists, and asking again would return the same bytes.
+  //
+  // A function rather than a property: the answer depends on the passing of
+  // time, and a binding would only be recomputed when the manifest changed —
+  // freezing it at "current" for exactly as long as it stayed out of date.
+  //
+  // A frame that reads as newer than now means the clock moved backwards, not
+  // that RainViewer published into the future: an RTC kept in local time, or
+  // NTP correcting a drift. Freshness cannot be judged against a clock that
+  // just jumped, so the safe answer is to go and ask.
+  function manifestIsCurrent() {
+    if (!radarManifest) return false
+    var age = Date.now() / 1000 - latestFrameTime
+    return age >= 0 && age < RadarModel.FRAME_INTERVAL_SEC
+  }
+
+  // The map calls these while it is open. Refcounted rather than boolean so two
+  // monitors showing the panel do not fight over whether fetching should stop.
   function acquireManifest() {
     frameConsumers++
-    if (!radarManifest) refreshManifest()
+    refreshManifest()
   }
 
   function releaseManifest() {
     frameConsumers = Math.max(0, frameConsumers - 1)
   }
 
+  // Every request passes through here, so this is where "is it worth asking"
+  // belongs, rather than at each call site. Three reasons not to: one is
+  // already in flight, the frames in hand are already the newest published, or
+  // the last attempt was too recent to have changed anything.
+  readonly property int minFetchGapMs: 60000
+  property real lastManifestFetchMs: 0
+
   function refreshManifest() {
     if (manifestProc.running) return
+    if (manifestIsCurrent()) return
+
+    var now = Date.now()
+    // As above, in the other direction: a request stamped in the future is a
+    // clock that moved, and left alone it would refuse every fetch until real
+    // time caught up — hours, on a machine whose RTC was wrong.
+    if (lastManifestFetchMs > now) lastManifestFetchMs = 0
+
+    // The floor bounds what opening and closing the map repeatedly can cost,
+    // so it guards frames already on screen and waits until there are some.
+    // Someone watching an empty map who closes it and opens it again is asking
+    // to retry, and a minute of silence is not an answer to that.
+    if (radarManifest && lastManifestFetchMs > 0 && now - lastManifestFetchMs < minFetchGapMs) return
+
+    lastManifestFetchMs = now
     manifestProc.command = ["curl", "-fsS", "--max-time", "10", RadarModel.MANIFEST_URL]
     manifestProc.running = true
   }
@@ -613,16 +654,30 @@ Item {
   readonly property int baseIntervalMs: RadarModel.FRAME_INTERVAL_SEC * 1000
   readonly property int backoffMultiplier: Math.min(6, Math.pow(2, Math.min(consecutiveFailures, 3)))
 
+  // Two things want this cadence, and either one on its own is reason enough to
+  // run: the alert check, which needs a location, and the map, which needs to
+  // be open.
+  //
+  // The backoff belongs to the alert check alone, because only the forecast can
+  // raise it, and it stands down while the map is open. Nothing about
+  // api.open-meteo.com refusing — a rate limit, a bad DNS answer, an outage of
+  // that one host — says anything about RainViewer, and stretching the map's
+  // cadence to an hour on that evidence would freeze the picture in front of
+  // someone who is watching it. With nobody watching, an hour between attempts
+  // is the right courtesy to a service having a bad day.
   Timer {
     id: pollTimer
-    interval: root.baseIntervalMs * root.backoffMultiplier
+    readonly property bool alerting: root.alertsEnabled && root.hasLocation
+    readonly property bool watched: root.frameConsumers > 0
+    interval: root.baseIntervalMs * (alerting && !watched ? root.backoffMultiplier : 1)
     repeat: true
-    running: root.alertsEnabled && root.hasLocation
+    running: alerting || watched
     triggeredOnStart: true
     onTriggered: {
-      root.checkNow()
-      // The map wants fresh frames too, but only while someone is looking.
-      if (root.frameConsumers > 0 || root.alertsEnabled) root.refreshManifest()
+      if (alerting) root.checkNow()
+      // Frames serve the map and nothing else, so a closed map is not a reason
+      // to fetch them — including for the alert, which reads the forecast.
+      if (watched) root.refreshManifest()
     }
   }
 
