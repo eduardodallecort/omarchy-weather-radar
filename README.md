@@ -168,10 +168,11 @@ over the Sahel, the Amazon, the United States, Indonesia and India. Heavy lands
 near the 99th percentile of wet slots in that survey: rare enough to mean
 something, common enough to fire.
 
-The promotion rule is the one that matters for storms. An already-rainy slot is
-raised one band when CAPE reaches 2000 J/kg, or 1000 J/kg alongside gusts of
-45 km/h. Rain alone does not make weather severe — rain arriving into an
-unstable airmass does, and CAPE measures the energy available to it.
+The promotion rule is the one that matters for storms. A slot already at
+moderate or above is raised one band when CAPE reaches 2000 J/kg, or 1000 J/kg
+alongside gusts of 45 km/h. Rain alone does not make weather severe — rain
+arriving into an unstable airmass does, and CAPE measures the energy available
+to it.
 
 A severe alert names the figures that put it there, and only those: rain heavy
 enough on its own reads "up to 18 mm/h", while ordinary rain into a loaded
