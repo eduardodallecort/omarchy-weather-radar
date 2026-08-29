@@ -64,7 +64,8 @@ the stock weather widget rather than to this plugin.
 
 ### Requirements
 
-Omarchy Quattro, and `curl`, which Omarchy already installs. The plugin calls
+Omarchy Quattro, and `curl`, which Omarchy already installs. The base map needs
+nothing at all — it ships with the plugin. The plugin calls
 `omarchy-weather-location` to store a chosen city and `omarchy-notification-send`
 to raise an alert — both ship with Omarchy. Nothing else is installed, and no
 configuration outside the widget's own entry is written.
@@ -97,16 +98,36 @@ mean heavier precipitation, and the most intense cores usually indicate hail.
 Eight palettes are available in the widget settings. NEXRAD Level III is the one
 most broadcast meteorologists use.
 
+### The base map
+
+The coastlines, borders, lakes, rivers, city footprints and place names are
+**drawn by the plugin from data in the repository**, not fetched from a tile
+server. That has three consequences worth knowing about:
+
+- The map works with **no network at all**. Only the radar needs one.
+- Nothing about it can be withdrawn or rate-limited. Earlier versions used a
+  free tile service that began requiring an API key in August 2026 and stamped
+  a watermark across every tile until one was supplied.
+- It follows your Omarchy theme. Switch themes and the ground changes with
+  everything else, while the radar keeps its own palette — see
+  [What the colours mean](#what-the-colours-mean).
+
+The trade is detail. The data is Natural Earth at 1:10 million, so there are no
+streets and no municipal boundaries, and at the deepest zoom a coastline is
+visibly generalised. City names are Natural Earth's own, which are usually the
+local spelling — `København`, `Göteborg` — and occasionally the English one:
+`Cologne` rather than `Köln`.
+
 ### Zoom
 
 RainViewer's radar tiles stop at zoom level 7, about 1.1 km per pixel. The map
-goes to level 10 anyway: past level 7 the base map carries on sharpening while
-the radar is scaled up over it.
+goes to level 9 anyway: past level 7 the ground carries on sharpening while the
+radar is scaled up over it, which shows plainly where the radar's data ran out.
 
-You zoom in to find out *which town* is under a storm, and the town comes from
-the base map, so capping the map at the radar's resolution would withhold detail
-that is genuinely available. The radar simply gets blockier, which shows plainly
-where its data ran out.
+It stops at 9 because that is where the ground runs out too. Natural Earth at
+1:10 million is drawn for scales down to roughly 1:2 million; magnifying it
+further would show a precision it does not have, over radar that was already
+being upscaled two levels earlier.
 
 ### Where there is no radar
 
@@ -273,12 +294,13 @@ absolute half is what stays true for someone reading it later.
 
 - Radar imagery: [RainViewer](https://www.rainviewer.com) — best-effort, no SLA
 - Forecast and geocoding: [Open-Meteo](https://open-meteo.com)
-- Base map: [CARTO](https://carto.com/basemaps/) over
-  [OpenStreetMap](https://www.openstreetmap.org/copyright) data
+- Base map: [Natural Earth](https://www.naturalearthdata.com/) 1:10m and 1:50m,
+  public domain, shipped with the plugin as `data/basemap.bin`
 
 ## Roadmap
 
 - Satellite cloud layer (GOES / Himawari via NASA GIBS)
+- A denser place-name set for the deepest zoom levels
 - Additional radar providers for regions with higher-resolution national
   networks, selectable per user
 - Motion-based arrival estimate rather than distance alone
@@ -320,6 +342,7 @@ that needs the shell to exist lives in a `.qml` file and is not.
 | `Panel.qml` | panel state and lifecycle; composes the pieces below |
 | `BarWidget.qml` | the bar pill |
 | `ui/RadarMap.qml` | basemap, radar layers, alert rings, pan and zoom |
+| `ui/BasemapLayer.qml` | draws the ground, in the running theme's colours |
 | `ui/TileLayer.qml` | one raster layer of an XYZ tile map |
 | `ui/CoverageProbe.qml` | reads the coverage mask to answer "is there radar here" |
 | `ui/Timeline.qml` | play/pause and the frame scrubber |
@@ -330,10 +353,27 @@ that needs the shell to exist lives in a `.qml` file and is not.
 | `lib/RadarModel.js` | RainViewer endpoints, parsing, echo analysis, sampling |
 | `lib/Alerts.js` | intensity bands, forecast reduction, the notification latch |
 | `lib/Settings.js` | reading and coercing the widget's settings |
+| `lib/Basemap.js` | decodes `data/basemap.bin` and projects it into the viewport |
 | `lib/Glyphs.js` | every Nerd Font glyph the plugin draws |
+| `tools/build-basemap.py` | builds `data/basemap.bin` from Natural Earth |
 
 A bar widget is instantiated once per monitor, so anything that polls belongs in
 the service, which the shell mounts exactly once per plugin.
+
+### Rebuilding the base map
+
+`data/basemap.bin` is generated and committed. Rebuild it only when the layers
+or their simplification change:
+
+```bash
+python3 tools/build-basemap.py
+```
+
+It downloads Natural Earth into `tools/.cache` (about 70 MB, ignored by git),
+simplifies each layer, quantises the coordinates onto a grid of a thousandth of
+a degree, and writes roughly 2.6 MB. The format is documented at the top of the
+generator and decoded by `lib/Basemap.js`; both sides are pinned by tests, so a
+change to one without the other fails rather than shipping a map of noise.
 
 ### Tests
 

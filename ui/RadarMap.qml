@@ -13,7 +13,10 @@ Item {
   id: root
 
   property var bar: null
-  property bool darkTheme: true
+
+  // The decoded ground layer, owned by the service. Null until it has loaded,
+  // which leaves the map as open sea for a moment rather than as nothing.
+  property var basemap: null
 
   // Where the map is looking.
   property real centerLatitude: 0
@@ -25,8 +28,7 @@ Item {
   // and get scaled up over a basemap that is still sharpening.
   property int radarSourceZoom: zoom
 
-  // function(zoom, x, y) -> string, one per layer. See RadarModel.
-  property var basemapTileUrl: null
+  // function(zoom, x, y) -> string, one per radar layer. See RadarModel.
   property var radarTileUrlA: null
   property var radarTileUrlB: null
 
@@ -53,23 +55,30 @@ Item {
   property string attribution: ""
 
   signal dragged(real latitude, real longitude)
-  signal zoomRequested(int zoom)
+
+  // Zooming carries a centre because the wheel zooms towards the pointer, not
+  // towards the middle of the map. Someone reaching for a coastal town does
+  // not want the sea their view happens to be centred on.
+  signal zoomRequested(int zoom, real latitude, real longitude)
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
 
   Rectangle {
     id: canvasFrame
     anchors.fill: parent
-    color: root.darkTheme ? "#101014" : "#e8e8ec"
+    // The same tone the ground layer paints its sea with, so the corners it
+    // cannot reach match rather than showing through as a hole.
+    color: ground.seaColor
     radius: Style.cornerRadius
     clip: true
 
-    TileLayer {
+    BasemapLayer {
+      id: ground
       anchors.fill: parent
+      basemap: root.basemap
       centerLatitude: root.centerLatitude
       centerLongitude: root.centerLongitude
       zoom: root.zoom
-      tileUrlFor: root.basemapTileUrl
     }
 
     TileLayer {
@@ -108,8 +117,13 @@ Item {
       anchors.fill: parent
       visible: root.hasLocation
 
+      // The copy of home nearest the centre. Two points either side of the
+      // antimeridian are a couple of degrees apart on the globe and 358 apart
+      // in their coordinates, so without this a map centred just east of the
+      // line puts the marker most of a world away.
       readonly property var home: TileMath.projectToViewport(
-        root.homeLatitude, root.homeLongitude,
+        root.homeLatitude,
+        TileMath.nearestLongitude(root.homeLongitude, root.centerLongitude),
         root.centerLatitude, root.centerLongitude,
         root.zoom, width, height)
 
@@ -145,7 +159,9 @@ Item {
         height: dot
         radius: dot / 2
         color: Color.accent
-        border.color: root.darkTheme ? "#000000" : "#ffffff"
+        // Outlined in the surface's own colour so the marker stays legible
+        // over a dark coastline and a light one alike.
+        border.color: Color.popups.background
         border.width: 1
       }
     }
@@ -182,11 +198,22 @@ Item {
       }
 
       onWheel: function(wheel) {
+        wheel.accepted = true
+
         var direction = wheel.angleDelta.y > 0 ? 1 : -1
         var next = Math.max(RadarModel.MIN_RADAR_ZOOM,
           Math.min(RadarModel.MAX_MAP_ZOOM, root.zoom + direction))
-        if (next !== root.zoom) root.zoomRequested(next)
-        wheel.accepted = true
+        if (next === root.zoom) return
+
+        // Which coordinate is under the pointer now, and where the map has to
+        // be centred for it to still be under the pointer afterwards.
+        var anchor = TileMath.unprojectFromViewport(
+          wheel.x, wheel.y, root.centerLatitude, root.centerLongitude,
+          root.zoom, width, height)
+        var moved = TileMath.centerForPoint(
+          anchor.latitude, anchor.longitude, wheel.x, wheel.y, next, width, height)
+
+        root.zoomRequested(next, moved.latitude, moved.longitude)
       }
     }
 

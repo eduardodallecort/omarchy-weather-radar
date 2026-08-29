@@ -52,7 +52,12 @@
         "key": "alertMinIntensity",
         "type": "enum",
         "label": "Alert threshold",
-        "options": ["Light", "Moderate", "Heavy", "Severe"],
+        "options": [
+          "Light",
+          "Moderate",
+          "Heavy",
+          "Severe"
+        ],
         "defaultValue": "Heavy",
         "description": "Minimum forecast rain rate worth a notification. Moderate or heavier arriving into an unstable airmass counts one band up, so a storm crosses the threshold sooner than steady rain of the same rate."
       },
@@ -78,10 +83,10 @@
         "type": "integer",
         "label": "Default zoom",
         "min": 3,
-        "max": 10,
+        "max": 9,
         "step": 1,
         "defaultValue": 7,
-        "description": "Zoom the map opens at. Past level 7 the base map keeps sharpening while the radar is scaled up, since that is where the radar data runs out."
+        "description": "Zoom the map opens at. Past level 7 the ground keeps sharpening while the radar is scaled up, since that is where the radar data runs out."
       },
       {
         "key": "smoothTiles",

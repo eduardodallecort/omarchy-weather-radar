@@ -157,3 +157,214 @@ test("tile X wraps around the world and tile Y does not", () => {
   assert.strictEqual(TileMath.isValidTileY(7, 3), true)
   assert.strictEqual(TileMath.isValidTileY(8, 3), false)
 })
+
+// ------------------------------------------------------------------ the seam
+
+test("longitude normalises onto the globe from anywhere", () => {
+  close(TileMath.wrapLongitude(0), 0, 1e-9, "prime meridian")
+  close(TileMath.wrapLongitude(120), 120, 1e-9, "unchanged inside the range")
+  close(TileMath.wrapLongitude(-120), -120, 1e-9, "unchanged inside the range")
+  close(TileMath.wrapLongitude(181), -179, 1e-9, "just past the antimeridian")
+  close(TileMath.wrapLongitude(200), -160, 1e-9, "panned east")
+  close(TileMath.wrapLongitude(-190), 170, 1e-9, "panned west")
+  close(TileMath.wrapLongitude(360), 0, 1e-9, "once round")
+  close(TileMath.wrapLongitude(-720), 0, 1e-9, "twice round the other way")
+  close(TileMath.wrapLongitude(180), -180, 1e-9, "the antimeridian belongs to the west")
+})
+
+test("the nearest copy of a longitude is never more than half a world away", () => {
+  // Two points either side of the antimeridian are a couple of degrees apart
+  // on the globe and 358 apart in their coordinates. Anything positioned by
+  // subtracting one from the other has to ask for the near copy.
+  close(TileMath.nearestLongitude(179, -179), -181, 1e-9, "east of the line, seen from the west")
+  close(TileMath.nearestLongitude(-179, 179), 181, 1e-9, "west of the line, seen from the east")
+  close(TileMath.nearestLongitude(10, 0), 10, 1e-9, "nothing to do in the ordinary case")
+  close(TileMath.nearestLongitude(-46.6, -46.6), -46.6, 1e-9, "a point is nearest to itself")
+
+  for (const reference of [-179, 0, 45, 179, 200, -540]) {
+    for (const longitude of [-180, -90, 0, 90, 179.9]) {
+      const near = TileMath.nearestLongitude(longitude, reference)
+      assert.ok(Math.abs(near - reference) <= 180 + 1e-9,
+        `${longitude} from ${reference} landed ${Math.abs(near - reference)} away`)
+      close(TileMath.wrapLongitude(near), TileMath.wrapLongitude(longitude), 1e-9,
+        "and it is still the same place")
+    }
+  }
+})
+
+// ------------------------------------------------------------------ anchoring
+
+test("a coordinate stays under the pixel it was anchored to", () => {
+  const width = 700
+  const height = 320
+
+  for (const zoom of [3, 5, 7, 9]) {
+    for (const [x, y] of [[0, 0], [350, 160], [699, 319], [120, 40]]) {
+      const centre = TileMath.centerForPoint(-23.5505, -46.6333, x, y, zoom, width, height)
+      const back = TileMath.projectToViewport(
+        -23.5505, -46.6333, centre.latitude, centre.longitude, zoom, width, height)
+      close(back.x, x, 1e-6, `x at z${zoom}`)
+      close(back.y, y, 1e-6, `y at z${zoom}`)
+    }
+  }
+})
+
+test("anchoring to the middle of the viewport centres on the coordinate", () => {
+  const centre = TileMath.centerForPoint(51.5074, -0.1278, 350, 160, 7, 700, 320)
+  close(centre.latitude, 51.5074, 1e-9, "latitude")
+  close(centre.longitude, -0.1278, 1e-9, "longitude")
+})
+
+test("zooming towards a pixel keeps what was under it under it", () => {
+  // The whole point of zooming to the pointer: read the coordinate under the
+  // cursor, then re-centre so it does not move.
+  const width = 700
+  const height = 320
+  let latitude = -23.5505
+  let longitude = -46.6333
+  const cursorX = 120
+  const cursorY = 40
+
+  const anchor = TileMath.unprojectFromViewport(
+    cursorX, cursorY, latitude, longitude, 6, width, height)
+
+  for (const zoom of [7, 8, 9]) {
+    const centre = TileMath.centerForPoint(
+      anchor.latitude, anchor.longitude, cursorX, cursorY, zoom, width, height)
+    const where = TileMath.projectToViewport(
+      anchor.latitude, anchor.longitude, centre.latitude, centre.longitude, zoom, width, height)
+    close(where.x, cursorX, 1e-6, `x at z${zoom}`)
+    close(where.y, cursorY, 1e-6, `y at z${zoom}`)
+  }
+})
+
+test("anchoring near a pole stays on the projection", () => {
+  // Mercator has no room above 85 degrees, so the centre is clamped and the
+  // anchor slides — but the map must not be asked to render a latitude that
+  // does not exist.
+  const centre = TileMath.centerForPoint(84.9, 0, 350, 319, 5, 700, 320)
+  assert.ok(Math.abs(centre.latitude) <= 85.0511287798, `latitude ${centre.latitude}`)
+  assert.ok(Number.isFinite(centre.longitude))
+})
+
+// ------------------------------------------------------------------ alignment
+
+test("the tile grid and the direct projection agree on where a coordinate is", () => {
+  // The ground is drawn by projecting each point, the radar by laying out a
+  // grid of tile images. Two different paths through this file, and the whole
+  // layered design rests on them landing on the same pixel: any drift shows up
+  // as rain sitting next to the coastline instead of on it, which nothing
+  // reports and only an eye catches.
+  const width = 700
+  const height = 320
+  const TILE = 256
+
+  for (const zoom of [3, 5, 7, 9]) {
+    for (const [centreLat, centreLon] of [[0, 0], [-23.5505, -46.6333], [51.5074, -0.1278], [-45, 170]]) {
+      const view = TileMath.viewportTiles(centreLat, centreLon, zoom, width, height)
+
+      for (const [lat, lon] of [[centreLat, centreLon], [centreLat + 1, centreLon + 1],
+                                [centreLat - 0.7, centreLon + 2.3]]) {
+        // How TileLayer places it: the tile grid's origin, plus the offset of
+        // the coordinate inside that grid.
+        const grid = {
+          x: view.originX + (TileMath.lonToTileX(lon, zoom) - view.minX) * TILE,
+          y: view.originY + (TileMath.latToTileY(lat, zoom) - view.minY) * TILE
+        }
+        // How BasemapLayer places it: straight from the centre.
+        const direct = TileMath.projectToViewport(
+          lat, lon, centreLat, centreLon, zoom, width, height)
+
+        close(grid.x, direct.x, 1e-6, `x at z${zoom} from ${centreLat},${centreLon}`)
+        close(grid.y, direct.y, 1e-6, `y at z${zoom} from ${centreLat},${centreLon}`)
+      }
+    }
+  }
+})
+
+test("a layer drawn below its own zoom lands where the full-resolution one would", () => {
+  // The radar's tiles stop at z7 and are scaled up past it, while the ground
+  // keeps sharpening. The upscaled grid has to cover exactly the same ground,
+  // or the rain drifts off the coast as you zoom in.
+  const width = 700
+  const height = 320
+  const TILE = 256
+
+  for (const zoom of [8, 9]) {
+    const sourceZoom = 7
+    const scale = Math.pow(2, zoom - sourceZoom)
+    const centreLat = -23.5505
+    const centreLon = -46.6333
+
+    // TileLayer lays the grid out in source-zoom space over a viewport shrunk
+    // by the scale, then scales the result onto the screen.
+    const view = TileMath.viewportTiles(
+      centreLat, centreLon, sourceZoom, width / scale, height / scale)
+
+    for (const [lat, lon] of [[centreLat, centreLon], [centreLat + 0.3, centreLon - 0.4]]) {
+      const scaled = {
+        x: (view.originX + (TileMath.lonToTileX(lon, sourceZoom) - view.minX) * TILE) * scale,
+        y: (view.originY + (TileMath.latToTileY(lat, sourceZoom) - view.minY) * TILE) * scale
+      }
+      const direct = TileMath.projectToViewport(
+        lat, lon, centreLat, centreLon, zoom, width, height)
+
+      close(scaled.x, direct.x, 1e-6, `x at z${zoom} over z${sourceZoom} tiles`)
+      close(scaled.y, direct.y, 1e-6, `y at z${zoom} over z${sourceZoom} tiles`)
+    }
+  }
+})
+
+// ------------------------------------------------------------------ the poles
+
+test("the viewport is kept inside the projection", () => {
+  // Regression: panning south of Antarctica put the world's bottom edge across
+  // the middle of the panel, with nothing under it and the map unresponsive.
+  const height = 320
+
+  for (const zoom of [4, 6, 9]) {
+    const world = Math.pow(2, zoom)
+    const halfTiles = (height / 2) / 256
+
+    for (const wanted of [-89.9, -86, -85.0511287798, -85, -60, 0, 60, 85, 86, 89.9]) {
+      const centre = TileMath.constrainLatitude(wanted, zoom, height)
+      const y = TileMath.latToTileY(centre, zoom)
+      assert.ok(y - halfTiles >= -1e-9, `z${zoom} from ${wanted}: top edge left the world`)
+      assert.ok(y + halfTiles <= world + 1e-9, `z${zoom} from ${wanted}: bottom edge left the world`)
+    }
+  }
+})
+
+test("a latitude already inside the limits is left alone", () => {
+  for (const zoom of [4, 6, 9]) {
+    for (const lat of [-60, -23.5505, 0, 51.5074]) {
+      close(TileMath.constrainLatitude(lat, zoom, 320), lat, 1e-9, `z${zoom} at ${lat}`)
+    }
+  }
+})
+
+test("the constraint tightens as the map zooms out", () => {
+  // The same panel covers more of the globe at a lower zoom, so a centre that
+  // was legal deep in stops being legal — which is why zooming has to reapply
+  // this and not only dragging.
+  const height = 320
+  const deep = TileMath.constrainLatitude(-89, 9, height)
+  const shallow = TileMath.constrainLatitude(-89, 4, height)
+  assert.ok(deep < shallow, `z9 allows ${deep}, z4 allows ${shallow}`)
+  assert.ok(shallow > -85.0511287798)
+})
+
+test("a panel taller than the world centres on the equator", () => {
+  // There is no valid centre when the whole globe is shorter than the viewport;
+  // the alternative is an arbitrary one that leaves a gap at top or bottom.
+  assert.strictEqual(TileMath.constrainLatitude(-80, 0, 320), 0)
+  assert.strictEqual(TileMath.constrainLatitude(40, 1, 900), 0)
+})
+
+test("constraining is symmetric between the poles", () => {
+  for (const zoom of [4, 6, 9]) {
+    const south = TileMath.constrainLatitude(-89.9, zoom, 320)
+    const north = TileMath.constrainLatitude(89.9, zoom, 320)
+    close(south, -north, 1e-9, `z${zoom}`)
+  }
+})

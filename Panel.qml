@@ -112,6 +112,17 @@ Panel {
   property real viewLongitude: 0
   property int zoom: Settings.defaultZoom(settings)
 
+  // The map's own height, declared once because the limit on how far north or
+  // south the view may sit is a question about the viewport rather than about
+  // the centre: half a panel of world has to stay on each side of it.
+  readonly property real mapHeight: Style.space(320)
+
+  // Reapplied on zoom as well as on panning. Zooming out makes the same panel
+  // cover more of the globe, so a centre that was legal deep in stops being
+  // legal — and without this, zooming out near a pole puts the world's edge
+  // across the middle of the map with nothing beyond it.
+  onZoomChanged: viewLatitude = TileMath.constrainLatitude(viewLatitude, zoom, mapHeight)
+
   // The radar layer stops requesting new detail here and gets scaled up
   // instead, so the basemap can keep sharpening past the data's limit.
   readonly property int radarSourceZoom: Math.min(zoom, RadarModel.MAX_RADAR_ZOOM)
@@ -121,7 +132,7 @@ Panel {
     // Nothing to centre on before a location exists; recentring on the
     // placeholder would move the view to 0,0 rather than leave it alone.
     if (!hasLocation) return
-    viewLatitude = homeLatitude
+    viewLatitude = TileMath.constrainLatitude(homeLatitude, zoom, mapHeight)
     viewLongitude = homeLongitude
   }
 
@@ -420,21 +431,14 @@ Panel {
   // Basemap
   // ---------------------------------------------------------------------------
 
-  // CARTO's label-light basemaps, picked to match the theme rather than a
-  // fixed palette: radar over a bright map in a dark theme is unreadable.
-  readonly property bool darkTheme: {
-    var background = Color.background
-    return (0.2126 * background.r + 0.7152 * background.g + 0.0722 * background.b) < 0.5
-  }
-  readonly property string basemapStyle: darkTheme ? "dark_all" : "light_all"
-
-  function basemapTileUrl(z, x, y) {
-    return "https://basemaps.cartocdn.com/" + basemapStyle + "/" + z + "/" + x + "/" + y + ".png"
-  }
+  // The ground is drawn from geometry that ships with the plugin, decoded once
+  // by the service. See ui/BasemapLayer.qml for why its colours follow the
+  // theme while the radar's do not.
+  readonly property var basemap: radar ? radar.basemap : null
 
   // Credit for everything drawn on the map, in one place so it cannot fall out
-  // of step with where the tiles actually come from.
-  readonly property string attribution: "RainViewer · CARTO · OpenStreetMap"
+  // of step with where the data actually comes from.
+  readonly property string attribution: "RainViewer · Natural Earth"
 
   function radarTileUrlA(z, x, y) { return root.radarTileUrlForFrame(root.frameA, z, x, y) }
   function radarTileUrlB(z, x, y) { return root.radarTileUrlForFrame(root.frameB, z, x, y) }
@@ -514,16 +518,15 @@ Panel {
 
         RadarMap {
           width: parent.width
-          height: Style.space(320)
+          height: root.mapHeight
           bar: root.bar
-          darkTheme: root.darkTheme
+          basemap: root.basemap
 
           centerLatitude: root.viewLatitude
           centerLongitude: root.viewLongitude
           zoom: root.zoom
           radarSourceZoom: root.radarSourceZoom
 
-          basemapTileUrl: root.basemapTileUrl
           radarTileUrlA: root.radarTileUrlA
           radarTileUrlB: root.radarTileUrlB
 
@@ -543,11 +546,27 @@ Panel {
           attribution: root.attribution
 
           onDragged: function(latitude, longitude) {
-            root.viewLatitude = latitude
-            root.viewLongitude = longitude
+            root.viewLatitude = TileMath.constrainLatitude(latitude, root.zoom, root.mapHeight)
+            // Normalised as it is stored, so panning east indefinitely keeps
+            // the centre a real coordinate rather than letting it grow without
+            // bound. The ground draws the world repeatedly either way; this is
+            // about what everything else positioned against the centre sees.
+            root.viewLongitude = TileMath.wrapLongitude(longitude)
             root.panned = true
           }
-          onZoomRequested: function(zoom) { root.zoom = zoom }
+          onZoomRequested: function(zoom, latitude, longitude) {
+            root.zoom = zoom
+            var wrapped = TileMath.wrapLongitude(longitude)
+            // Zooming towards the pointer moves the view, so it counts as
+            // panning — otherwise the next location update would snap the map
+            // back. Zooming on the centre moves nothing and must not.
+            var constrained = TileMath.constrainLatitude(latitude, zoom, root.mapHeight)
+            if (constrained !== root.viewLatitude || wrapped !== root.viewLongitude) {
+              root.viewLatitude = constrained
+              root.viewLongitude = wrapped
+              root.panned = true
+            }
+          }
 
           CoverageProbe {
             id: coverageProbe

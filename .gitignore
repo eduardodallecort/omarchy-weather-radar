@@ -5,3 +5,7 @@
 
 # Local scratch space for screenshots and experiments that should not ship
 scratch/
+
+# Natural Earth sources, downloaded by tools/build-basemap.py. Around 70 MB,
+# and the generated data/basemap.bin is what actually ships.
+tools/.cache/

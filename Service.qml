@@ -3,6 +3,7 @@ import Quickshell
 import Quickshell.Io
 import "lib/Glyphs.js" as Glyphs
 import "lib/Alerts.js" as Alerts
+import "lib/Basemap.js" as Basemap
 import "lib/RadarModel.js" as RadarModel
 import "lib/Settings.js" as Settings
 
@@ -193,6 +194,7 @@ Item {
   // monitors showing the panel do not fight over whether fetching should stop.
   function acquireManifest() {
     frameConsumers++
+    loadBasemap()
     refreshManifest()
   }
 
@@ -244,6 +246,48 @@ Item {
         root.frameFailures = 0
         root.radarManifest = parsed
       }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Basemap
+  // ---------------------------------------------------------------------------
+
+  // The ground the radar is drawn on, decoded once for the whole session.
+  //
+  // It lives here rather than in the panel for the same reason the frame
+  // manifest does: a bar widget is built once per monitor, and two screens
+  // showing the map would otherwise each hold their own ten megabytes of
+  // coastline. It is read on first use rather than at startup, so a session
+  // that never opens the map never pays for it.
+  //
+  // Data ships with the plugin instead of arriving as tiles. The world's
+  // coastlines do not change, and a keyless tile endpoint is a policy rather
+  // than a property — the one this plugin used began stamping "API KEY
+  // REQUIRED" across every tile in August 2026, for every installation at
+  // once, with nothing failing anywhere. Geometry in the repository cannot be
+  // withdrawn, and works with no network at all.
+  property var basemap: null
+  property bool basemapFailed: false
+
+  function loadBasemap() {
+    if (basemap || basemapFile.path !== "") return
+    basemapFile.path = Qt.resolvedUrl("data/basemap.bin").toString().replace("file://", "")
+  }
+
+  FileView {
+    id: basemapFile
+    path: ""
+    onLoaded: {
+      root.basemap = Basemap.decode(basemapFile.data())
+      // decode() answers null on anything it cannot read rather than throwing,
+      // so a corrupt or truncated file costs the ground layer and nothing else.
+      root.basemapFailed = root.basemap === null
+      if (root.basemapFailed) console.warn("weather-radar: data/basemap.bin could not be decoded")
+    }
+    onLoadFailed: {
+      root.basemapFailed = true
+      console.warn("weather-radar: data/basemap.bin could not be read")
     }
   }
 
