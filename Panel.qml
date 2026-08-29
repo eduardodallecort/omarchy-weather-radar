@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Effects
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -447,16 +448,18 @@ Panel {
   // Basemap
   // ---------------------------------------------------------------------------
 
-  // CARTO's label-light basemaps, picked to match the theme rather than a
-  // fixed palette: radar over a bright map in a dark theme is unreadable.
+  // OpenStreetMap's standard raster tiles need no account or API key. A local
+  // helper gives requests the provider-required identity and disk cache; it
+  // exposes only an ephemeral loopback port. A lightweight effect darkens the
+  // same tiles for dark themes so radar remains readable.
   readonly property bool darkTheme: {
     var background = Color.background
     return (0.2126 * background.r + 0.7152 * background.g + 0.0722 * background.b) < 0.5
   }
-  readonly property string basemapStyle: darkTheme ? "dark_all" : "light_all"
-
   function basemapTileUrl(z, x, y) {
-    return "https://basemaps.cartocdn.com/" + basemapStyle + "/" + z + "/" + x + "/" + y + ".png"
+    var port = radar ? Number(radar.basemapProxyPort || 0) : 0
+    if (port <= 0) return ""
+    return "http://127.0.0.1:" + port + "/" + z + "/" + x + "/" + y + ".png"
   }
 
   function radarTileUrlA(z, x, y) { return root.radarTileUrlForFrame(root.frameA, z, x, y) }
@@ -553,6 +556,14 @@ Panel {
               centerLongitude: root.viewLongitude
               zoom: root.zoom
               tileUrlFor: root.basemapTileUrl
+              revision: root.radar ? root.radar.basemapProxyPort : 0
+              layer.enabled: root.darkTheme
+              layer.smooth: true
+              layer.effect: MultiEffect {
+                brightness: -0.48
+                contrast: 0.12
+                saturation: -0.35
+              }
             }
 
             // Two radar layers that trade places. See showFrame(): the next
@@ -685,7 +696,7 @@ Panel {
               anchors.right: parent.right
               anchors.bottom: parent.bottom
               anchors.margins: Style.space(6)
-              text: "RainViewer · CARTO · OpenStreetMap"
+              text: "RainViewer · © OpenStreetMap contributors"
               color: root.bar ? root.bar.foreground : Color.foreground
               font.family: Style.font.family
               font.pixelSize: Style.font.caption * 0.8

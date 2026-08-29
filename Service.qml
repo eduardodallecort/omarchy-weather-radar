@@ -55,6 +55,15 @@ Item {
   readonly property int alertRadiusKm: Math.max(25, Math.min(250, Number(setting("alertRadiusKm", 100)) || 100))
   readonly property string alertThreshold: String(setting("alertMinIntensity", "Heavy"))
 
+  // Qt Quick Image cannot add the identifying User-Agent required by the
+  // OpenStreetMap tile service. A loopback-only Python helper does that and
+  // maintains the required seven-day cache; its ephemeral port is shared with
+  // every panel instance through this singleton.
+  property int basemapProxyPort: 0
+  property int basemapProxyRestartMs: 2000
+  property bool basemapProxyStopping: false
+  readonly property string basemapProxyPath: Qt.resolvedUrl("basemap_proxy.py").toString().replace(/^file:\/\//, "")
+
   // Storms in most of the world travel somewhere around 50 km/h, so the alert
   // radius doubles as a lead time: 100 km is roughly two hours of warning.
   // Expressing it this way means one setting controls both the ring drawn on
@@ -122,6 +131,45 @@ Item {
       if (root.locationRetries < root.locationRetryBurst) root.locationRetries++
       locationFile.reload()
     }
+  }
+
+  Timer {
+    id: basemapProxyRestart
+    interval: root.basemapProxyRestartMs
+    repeat: false
+    onTriggered: basemapProxy.running = true
+  }
+
+  Process {
+    id: basemapProxy
+    command: ["python3", root.basemapProxyPath]
+    stdout: SplitParser {
+      splitMarker: "\n"
+      onRead: function(line) {
+        var match = /^READY (\d+)$/.exec(String(line || "").trim())
+        if (!match) return
+        root.basemapProxyPort = Number(match[1])
+        root.basemapProxyRestartMs = 2000
+      }
+    }
+    stderr: SplitParser {
+      splitMarker: "\n"
+      onRead: function(line) {
+        if (String(line || "").trim() !== "") console.warn("weather-radar basemap: " + line)
+      }
+    }
+    onExited: function(exitCode) {
+      root.basemapProxyPort = 0
+      if (root.basemapProxyStopping) return
+      root.basemapProxyRestartMs = Math.min(30000, root.basemapProxyRestartMs * 2)
+      basemapProxyRestart.restart()
+    }
+  }
+
+  Component.onCompleted: basemapProxy.running = true
+  Component.onDestruction: {
+    root.basemapProxyStopping = true
+    basemapProxy.running = false
   }
 
   // Identity of the configured place, and the thing "changed" is measured

@@ -273,8 +273,9 @@ absolute half is what stays true for someone reading it later.
 
 - Radar imagery: [RainViewer](https://www.rainviewer.com) — best-effort, no SLA
 - Forecast and geocoding: [Open-Meteo](https://open-meteo.com)
-- Base map: [CARTO](https://carto.com/basemaps/) over
-  [OpenStreetMap](https://www.openstreetmap.org/copyright) data
+- Base map: [OpenStreetMap](https://www.openstreetmap.org/copyright), fetched
+  through a loopback-only helper that supplies the required application
+  identity and keeps a seven-day disk cache
 
 ## Roadmap
 
