@@ -397,8 +397,14 @@ node --test
 ```
 
 They cover the projection, the RainViewer and Open-Meteo parsing, the alert
-bands and latch, the settings coercion, and the glyph codepoints. Some of them
-pin bugs that have already been fixed once.
+bands and latch, the settings coercion, the frame selection and the glyph
+codepoints. Some of them pin bugs that have already been fixed once.
+
+`test/streams.test.js` is a different kind of check: it holds the QML sources to
+a written-down inventory of everything that reaches the shell process, and to a
+ceiling on each. A plugin runs inside the process that owns the bar, the panels
+and the lock screen, so a stream added later without a limit fails the suite
+rather than turning up in a review.
 
 QML is checked statically, which needs the shell's modules on the import path:
 

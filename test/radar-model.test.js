@@ -363,3 +363,25 @@ test("the bar label says clear rather than nothing when there is no echo", () =>
     RadarModel.summaryLabel({ found: true, label: "heavy", distanceKm: 42.3, compass: "SW" }),
     "heavy 42 km SW")
 })
+
+test("a manifest naming somewhere other than an https host is rejected", () => {
+  // Every tile and mask is built from `host`, so a manifest carrying anything
+  // else redirects all of them. Accepting "a string" is not accepting a URL.
+  const withHost = host => JSON.stringify({
+    host: host, radar: { past: [{ time: 1788009000, path: "/v2/radar/1" }] }
+  })
+
+  for (const bad of ["", "   ", "http://tilecache.rainviewer.com", "//evil.example",
+                     "javascript:alert(1)", "ftp://x", "https://", "tilecache.rainviewer.com",
+                     "https://a b", 'https://x"y', "https://x\\y", 42, null]) {
+    assert.strictEqual(RadarModel.parseManifest(withHost(bad)), null, JSON.stringify(bad))
+  }
+
+  assert.notStrictEqual(RadarModel.parseManifest(withHost("https://tilecache.rainviewer.com")), null)
+})
+
+test("a host longer than any real one is rejected", () => {
+  const long = "https://" + "a".repeat(300)
+  assert.strictEqual(RadarModel.isTileHost(long), false)
+  assert.strictEqual(RadarModel.isTileHost("https://tilecache.rainviewer.com"), true)
+})

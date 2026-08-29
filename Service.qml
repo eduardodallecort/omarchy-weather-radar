@@ -65,6 +65,15 @@ Item {
   // Shared with the stock weather widget, which owns the file. Watching it
   // means changing city through the Omarchy menu re-centres the radar live.
   //
+  // Read whole, without a ceiling, which is the one place this plugin does
+  // that. It is deliberate: this is Omarchy's own state file, read exactly as
+  // Omarchy's own weather panel reads it, with the same FileView and the same
+  // watch. Reading it through a bounded process instead would mean diverging
+  // from the platform on the platform's own file, and losing live updates with
+  // it — omarchy-weather-location writes the file and notifies nobody, so the
+  // watch is the only mechanism there is. Every stream this plugin owns is
+  // bounded; see test/streams.test.js for the inventory.
+  //
   // The watch only reaches as far as the containing directory. On a machine
   // where no weather location was ever set, `~/.local/state/omarchy/settings/`
   // does not exist, so there is nothing to watch and the file appearing later
@@ -226,27 +235,49 @@ Item {
     if (radarManifest && lastManifestFetchMs > 0 && now - lastManifestFetchMs < minFetchGapMs) return
 
     lastManifestFetchMs = now
-    manifestProc.command = ["curl", "-fsS", "--max-time", "10", RadarModel.MANIFEST_URL]
+    manifestProc.answered = false
+    manifestProc.command = RadarModel.manifestCommand()
     manifestProc.running = true
   }
 
   Process {
     id: manifestProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        var parsed = RadarModel.parseManifest(text)
-        if (!parsed) {
-          // Keep the previous manifest: stale frames still render, and the
-          // next tick retries. Blanking the map on one failed request would
-          // be a worse outcome than showing data a few minutes old.
-          root.frameFailures++
-          return
-        }
-        root.frameFailures = 0
-        root.radarManifest = parsed
-      }
+
+    // A process that cannot be started emits neither `started` nor `exited`,
+    // and goes from running to not running in silence. `exited` fires before
+    // `running` drops, so a drop with nothing recorded is a fork that never
+    // happened — which has to be answered, or the map waits on a reply that
+    // will never come.
+    property bool answered: false
+
+    onExited: function(exitCode) {
+      answered = true
+      root.applyManifestResponse(exitCode, manifestOut.text)
     }
+    onRunningChanged: if (!running && !answered) root.applyManifestResponse(-1, "")
+
+    // The collector holds the output and decides nothing. `onStreamFinished`
+    // fires before `onExited`, so deciding there is deciding before the exit
+    // code exists — and a transfer cut short by the time or size ceiling would
+    // be read as one that completed.
+    stdout: StdioCollector { id: manifestOut; waitForEnd: true }
+  }
+
+  function applyManifestResponse(exitCode, text) {
+    // Keep the previous manifest on any failure: stale frames still render,
+    // and the next tick retries. Blanking the map on one failed request would
+    // be a worse outcome than showing data a few minutes old.
+    if (exitCode !== 0) {
+      frameFailures++
+      return
+    }
+    var parsed = RadarModel.parseManifest(text)
+    if (!parsed) {
+      frameFailures++
+      return
+    }
+    frameFailures = 0
+    radarManifest = parsed
   }
 
   // ---------------------------------------------------------------------------
@@ -267,6 +298,10 @@ Item {
   // REQUIRED" across every tile in August 2026, for every installation at
   // once, with nothing failing anywhere. Geometry in the repository cannot be
   // withdrawn, and works with no network at all.
+  // Also read whole. It is this plugin's own file, inside its own directory:
+  // anything able to replace it can replace Service.qml beside it, so a
+  // ceiling here would guard nothing. Corruption is handled instead — decode()
+  // answers null on anything it cannot read, including a truncated file.
   property var basemap: null
   property bool basemapFailed: false
 
@@ -363,47 +398,53 @@ Item {
       return
     }
 
-    var lats = []
-    var lons = []
-    for (var i = 0; i < points.length; i++) {
-      lats.push(points[i].latitude.toFixed(4))
-      lons.push(points[i].longitude.toFixed(4))
-    }
-
-    var url = "https://api.open-meteo.com/v1/forecast"
-      + "?latitude=" + lats.join(",")
-      + "&longitude=" + lons.join(",")
-      + "&minutely_15=precipitation,precipitation_probability"
-      + "&hourly=cape,wind_gusts_10m"
-      + "&forecast_minutely_15=" + forecastSlots
-      + "&forecast_hours=" + Math.max(2, Math.ceil(leadMinutes / 60))
-      + "&timezone=auto"
-    forecastProc.command = ["curl", "-fsS", "--max-time", "12", url]
+    forecastProc.answered = false
+    forecastProc.command = RadarModel.forecastCommand(
+      points, forecastSlots, Math.max(2, Math.ceil(leadMinutes / 60)))
     forecastProc.running = true
   }
 
   Process {
     id: forecastProc
+
+    // See manifestProc. `checking` is cleared only from here, so a fork that
+    // never happened would leave it set and every later check would return at
+    // the door — the alert silently stopping for the rest of the session.
+    property bool answered: false
+
     onExited: function(exitCode) {
-      root.checking = false
-      if (exitCode !== 0) root.consecutiveFailures++
+      answered = true
+      root.applyForecastResponse(exitCode, forecastOut.text)
     }
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        var raw = String(text || "").trim()
-        if (raw === "") return
-        var data
-        try {
-          data = JSON.parse(raw)
-        } catch (e) {
-          root.consecutiveFailures++
-          return
-        }
-        root.consecutiveFailures = 0
-        root.applyForecast(data)
-      }
+    onRunningChanged: if (!running && !answered) root.applyForecastResponse(-1, "")
+
+    stdout: StdioCollector { id: forecastOut; waitForEnd: true }
+  }
+
+  function applyForecastResponse(exitCode, text) {
+    checking = false
+
+    if (exitCode !== 0) {
+      consecutiveFailures++
+      return
     }
+
+    var raw = String(text || "").trim()
+    if (raw === "") {
+      consecutiveFailures++
+      return
+    }
+
+    var data
+    try {
+      data = JSON.parse(raw)
+    } catch (e) {
+      consecutiveFailures++
+      return
+    }
+
+    consecutiveFailures = 0
+    applyForecast(data)
   }
 
   function applyForecast(data) {

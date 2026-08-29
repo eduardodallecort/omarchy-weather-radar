@@ -90,6 +90,11 @@ Item {
       source: root.tileUrlFor ? root.tileUrlFor(root.sourceZoom, modelData.tileX, modelData.tileY) : ""
       asynchronous: true
       cache: true
+      // The loader is asked for a tile-sized surface rather than whatever the
+      // response turns out to declare. Every other stream that reaches this
+      // process carries a ceiling; an image arriving over the network is one
+      // too, and its size is decided by whoever served it.
+      sourceSize: Qt.size(root.tileSize, root.tileSize)
       // Upscaled tiles need the smoothing; native-resolution ones look
       // sharper without it.
       smooth: root.smooth || root.sourceScale > 1

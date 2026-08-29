@@ -156,3 +156,18 @@ test("the presets are not mutated by being read", () => {
   Settings.radiusPresets(137)
   assert.deepStrictEqual(Settings.RADIUS_PRESETS_KM, [50, 100, 150, 200])
 })
+
+test("an unusable default colour scheme yields a colour, not a stack overflow", () => {
+  // The fallback used to be a call back into the same function, whose base case
+  // lived in another file: it ended only because DEFAULTS.colorScheme happened
+  // to name a scheme RadarModel declares. Renaming one without the other would
+  // not have produced the wrong colour, it would have overflowed the stack
+  // while the panel was being built.
+  const stranded = loadLibrary("Settings.js", {
+    RadarModel: { COLOR_SCHEMES: [{ id: 7, name: "Something Else" }] },
+    Alerts: Alerts
+  })
+
+  assert.strictEqual(stranded.colorSchemeId({ colorScheme: "Nonexistent" }), 7)
+  assert.strictEqual(stranded.colorSchemeId({}), 7, "and with no setting at all")
+})

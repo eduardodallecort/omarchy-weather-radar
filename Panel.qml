@@ -217,6 +217,7 @@ Panel {
       locationSaveProc.command = ["omarchy-weather-location", "--set", name]
     else
       locationSaveProc.command = ["omarchy-weather-location", "--clear"]
+    locationSaveProc.answered = false
     locationSaveProc.running = true
   }
 
@@ -235,7 +236,8 @@ Panel {
 
   function startGeocode() {
     geocodeActiveQuery = geocodePendingQuery
-    geocodeProc.command = ["curl", "-fsS", "--max-time", "5", RadarModel.geocodingUrl(geocodeActiveQuery, 5)]
+    geocodeProc.answered = false
+    geocodeProc.command = RadarModel.geocodingCommand(geocodeActiveQuery, 5)
     geocodeProc.running = true
   }
 
@@ -247,43 +249,73 @@ Panel {
 
   Process {
     id: geocodeProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.locationSuggestions = root.editingLocation ? RadarModel.parseGeocodingResults(text) : []
-        root.suggestionIndex = 0
-        if (root.geocodePendingQuery !== root.geocodeActiveQuery) Qt.callLater(root.startGeocode)
-      }
+
+    // A process that cannot be started emits neither `started` nor `exited`.
+    // Without an answer the search field would keep whatever suggestions it
+    // had and never ask again for the query the user has since typed.
+    property bool answered: false
+
+    onExited: function(exitCode) {
+      answered = true
+      root.applyGeocodeResponse(exitCode, geocodeOut.text)
     }
+    onRunningChanged: if (!running && !answered) root.applyGeocodeResponse(-1, "")
+
+    // The collector holds the output and decides nothing: `onStreamFinished`
+    // runs before the exit code exists, so a search cut short by the time or
+    // size ceiling would be read as a search that found nothing.
+    stdout: StdioCollector { id: geocodeOut; waitForEnd: true }
+  }
+
+  function applyGeocodeResponse(exitCode, text) {
+    // A failed search leaves no suggestions rather than stale ones: a list
+    // from the previous query, under the letters just typed, is a wrong answer
+    // presented as a current one.
+    root.locationSuggestions = (exitCode === 0 && root.editingLocation)
+      ? RadarModel.parseGeocodingResults(text) : []
+    root.suggestionIndex = 0
+    if (root.geocodePendingQuery !== root.geocodeActiveQuery) Qt.callLater(root.startGeocode)
   }
 
   Process {
     id: locationSaveProc
+
+    // See geocodeProc. `savingLocation` is cleared only from here, so a fork
+    // that never happened would leave the spinner turning and the field
+    // disabled for as long as the panel lives.
+    property bool answered: false
+
     onExited: function(exitCode) {
-      root.savingLocation = false
-      if (exitCode !== 0) return
-
-      // Clear `panned` before anything can deliver a location, so the order of
-      // what follows cannot decide whether the map recentres.
-      root.panned = false
-
-      // Recentre now only when what was saved is what home already holds —
-      // re-choosing the stored city, where identical coordinates mean no
-      // property changes and so nothing else would fire. Doing it
-      // unconditionally would snap the map to the previous city first on a
-      // move, and onto the city just removed on a clear.
-      if (isFinite(root.pendingLatitude)
-          && root.pendingLatitude === root.homeLatitude
-          && root.pendingLongitude === root.homeLongitude) root.recenter()
-
-      // Then ask the service to re-read rather than waiting for its file watch.
-      // The first location ever written lands in a directory that did not exist
-      // when that watch was set up, so nothing would announce it. A different
-      // city arrives asynchronously and recentres again.
-      if (root.radar && root.radar.reloadLocation) root.radar.reloadLocation()
-
-      root.cancelEditingLocation()
+      answered = true
+      root.applyLocationSave(exitCode)
     }
+    onRunningChanged: if (!running && !answered) root.applyLocationSave(-1)
+  }
+
+  function applyLocationSave(exitCode) {
+    root.savingLocation = false
+    if (exitCode !== 0) return
+
+    // Clear `panned` before anything can deliver a location, so the order of
+    // what follows cannot decide whether the map recentres.
+    root.panned = false
+
+    // Recentre now only when what was saved is what home already holds —
+    // re-choosing the stored city, where identical coordinates mean no
+    // property changes and so nothing else would fire. Doing it
+    // unconditionally would snap the map to the previous city first on a
+    // move, and onto the city just removed on a clear.
+    if (isFinite(root.pendingLatitude)
+        && root.pendingLatitude === root.homeLatitude
+        && root.pendingLongitude === root.homeLongitude) root.recenter()
+
+    // Then ask the service to re-read rather than waiting for its file watch.
+    // The first location ever written lands in a directory that did not exist
+    // when that watch was set up, so nothing would announce it. A different
+    // city arrives asynchronously and recentres again.
+    if (root.radar && root.radar.reloadLocation) root.radar.reloadLocation()
+
+    root.cancelEditingLocation()
   }
 
   // ---------------------------------------------------------------------------
