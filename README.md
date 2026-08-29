@@ -77,11 +77,20 @@ configuration outside the widget's own entry is written.
 | | |
 | --- | --- |
 | Drag | pan |
-| Wheel, `+` / `-` | zoom |
+| Wheel, `+` / `-` | zoom towards the pointer |
 | Play button, `Enter` | play the last two hours |
 | `←` / `→` | step one frame |
-| `Home` | recentre on your location |
+| Crosshair button, `Home` | recentre on your location |
 | `Esc` | close |
+
+The panel opens on your location and on the newest frame, every time. Both are
+questions about now: panning and scrubbing are for looking around while you are
+there, not for choosing what the panel shows the next time you ask.
+
+While it is open the opposite holds. A new frame list arriving every ten minutes
+does not move you: if you have scrubbed back to a particular time, you stay on
+that time, at whatever position it has moved to since — or on the oldest frame
+still published, once the moment has aged out of the two-hour window.
 
 While it is open the map looks for a new frame every ten minutes, which is about
 how often RainViewer publishes one — so the newest frame on screen can be up to
@@ -354,6 +363,7 @@ that needs the shell to exist lives in a `.qml` file and is not.
 | `lib/Alerts.js` | intensity bands, forecast reduction, the notification latch |
 | `lib/Settings.js` | reading and coercing the widget's settings |
 | `lib/Basemap.js` | decodes `data/basemap.bin` and projects it into the viewport |
+| `lib/Frames.js` | which radar frame to show, across a list that keeps being replaced |
 | `lib/Glyphs.js` | every Nerd Font glyph the plugin draws |
 | `tools/build-basemap.py` | builds `data/basemap.bin` from Natural Earth |
 

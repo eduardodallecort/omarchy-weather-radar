@@ -5,6 +5,7 @@ import qs.Commons
 import qs.Ui
 import "ui"
 import "lib/Alerts.js" as Alerts
+import "lib/Frames.js" as Frames
 import "lib/Glyphs.js" as Glyphs
 import "lib/Settings.js" as Settings
 import "lib/TileMath.js" as TileMath
@@ -293,21 +294,61 @@ Panel {
   property int frameIndex: 0
   property bool playing: false
 
+  // What the user is looking at, expressed so that it survives the list being
+  // replaced: the moment on screen, and whether they chose to follow the newest
+  // frame. Both are recorded while the list that produced them is still in
+  // hand — an index into the old list means nothing in the new one, and the
+  // panel outlives many replacements.
+  property real shownTime: 0
+  property bool followingLatest: true
+
+  // Bumped whenever the list is replaced. At an unchanged index a new manifest
+  // is still a different frame, and without this the radar layers keep the
+  // tiles they already have.
+  property int frameEpoch: 0
+
   readonly property var currentFrame: {
-    if (!frames || frames.length === 0) return null
-    var index = Math.max(0, Math.min(frames.length - 1, frameIndex))
-    return frames[index]
+    var index = Frames.clampIndex(frames, frameIndex)
+    return index < 0 ? null : frames[index]
   }
 
   readonly property string frameLabel: currentFrame ? RadarModel.formatFrameTime(currentFrame.time) : "--:--"
-  readonly property bool isLatestFrame: frames.length > 0 && frameIndex >= frames.length - 1
+  readonly property bool isLatestFrame: Frames.isLatest(frames, frameIndex)
 
-  // A new manifest arrives every ten minutes. Someone parked on the newest
-  // frame wants to stay on the newest frame; someone scrubbing through history
-  // wants to stay where they put the cursor.
+  // Jump to the newest frame in hand, and follow it from here. What "newest"
+  // means is decided again each time the list is replaced, so this holds even
+  // when the list on screen is hours old and the real one has not arrived yet.
+  function showLatestFrame() {
+    followingLatest = true
+    var latest = frames.length - 1
+    if (latest >= 0 && frameIndex !== latest) frameIndex = latest
+    else recordShownFrame()
+  }
+
+  function recordShownFrame() {
+    var frame = currentFrame
+    shownTime = frame ? frame.time : 0
+    followingLatest = Frames.isLatest(frames, frameIndex)
+  }
+
+  // A new manifest arrives every ten minutes, and the panel is opened against
+  // lists it has never seen. Someone parked on the newest frame wants the
+  // newest frame whatever the new list looks like; someone who scrubbed back to
+  // a time wants that time, at whatever index it now sits.
   onFramesChanged: {
     if (frames.length === 0) return
-    if (frameIndex >= frames.length - 1 || frameIndex === 0) frameIndex = frames.length - 1
+    frameEpoch++
+
+    var next = Frames.reselect(frames, shownTime, followingLatest)
+    if (next !== frameIndex) {
+      frameIndex = next
+    } else {
+      // The same position in a different list is a different frame, so the
+      // layers are told even though the index did not move.
+      showFrame(frameIndex)
+      recordShownFrame()
+    }
+
     if (frameA < 0) { frameA = frameIndex; frontIsA = true }
   }
 
@@ -319,7 +360,10 @@ Panel {
   property int frameB: -1
   property bool frontIsA: true
 
-  onFrameIndexChanged: showFrame(frameIndex)
+  onFrameIndexChanged: {
+    showFrame(frameIndex)
+    recordShownFrame()
+  }
 
   function showFrame(index) {
     if (index < 0 || frames.length === 0) return
@@ -343,10 +387,7 @@ Panel {
     interval: root.isLatestFrame ? 1500 : 550
     repeat: true
     running: root.playing && root.opened && root.frames.length > 1
-    onTriggered: {
-      if (root.frameIndex >= root.frames.length - 1) root.frameIndex = 0
-      else root.frameIndex++
-    }
+    onTriggered: root.frameIndex = Frames.nextIndex(root.frames, root.frameIndex)
   }
 
   // ---------------------------------------------------------------------------
@@ -396,7 +437,19 @@ Panel {
   }
 
   function onOpened() {
-    if (!panned && hasLocation) recenter()
+    // Opening is a question about now, so the view and the clock both start
+    // there. Wherever the map was left, and whatever moment was on the
+    // timeline, is where somebody was looking once — not where they are asking
+    // to look now. A moment scrubbed to two hours ago may not even be published
+    // any more, and the nearest surviving frame to it is the oldest one in the
+    // window: the furthest from the question being asked.
+    //
+    // While the panel is open the opposite holds, and Frames.reselect keeps
+    // whoever is studying a particular time on that time as the list moves
+    // under them.
+    panned = false
+    if (hasLocation) recenter()
+    showLatestFrame()
     if (root.radar && !manifestHeld) {
       root.radar.acquireManifest()
       manifestHeld = true
@@ -532,6 +585,7 @@ Panel {
 
           frameA: root.frameA
           frameB: root.frameB
+          frameEpoch: root.frameEpoch
           frontIsA: root.frontIsA
           colorSchemeId: root.colorSchemeId
           smoothTiles: root.smoothTiles
@@ -553,6 +607,10 @@ Panel {
             // about what everything else positioned against the centre sees.
             root.viewLongitude = TileMath.wrapLongitude(longitude)
             root.panned = true
+          }
+          onRecenterRequested: {
+            root.panned = false
+            root.recenter()
           }
           onZoomRequested: function(zoom, latitude, longitude) {
             root.zoom = zoom

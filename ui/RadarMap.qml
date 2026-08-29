@@ -1,5 +1,7 @@
 import QtQuick
 import qs.Commons
+import qs.Ui
+import "../lib/Glyphs.js" as Glyphs
 import "../lib/RadarModel.js" as RadarModel
 import "../lib/TileMath.js" as TileMath
 
@@ -38,6 +40,10 @@ Item {
   property int frameA: -1
   property int frameB: -1
   property bool frontIsA: true
+
+  // Changes when the frame list is replaced. Folded into each layer's revision
+  // so that a new manifest reloads the tiles even when the index did not move.
+  property int frameEpoch: 0
   property int colorSchemeId: 2
   property bool smoothTiles: true
 
@@ -55,6 +61,7 @@ Item {
   property string attribution: ""
 
   signal dragged(real latitude, real longitude)
+  signal recenterRequested()
 
   // Zooming carries a centre because the wheel zooms towards the pointer, not
   // towards the middle of the map. Someone reaching for a coastal town does
@@ -88,7 +95,7 @@ Item {
       zoom: root.zoom
       sourceZoom: root.radarSourceZoom
       tileUrlFor: root.radarTileUrlA
-      revision: root.frameA + (root.colorSchemeId * 1000)
+      revision: root.frameA + (root.colorSchemeId * 1000) + (root.frameEpoch * 100000)
       smooth: root.smoothTiles
       opacity: root.frontIsA ? 1 : 0
       Behavior on opacity {
@@ -103,7 +110,7 @@ Item {
       zoom: root.zoom
       sourceZoom: root.radarSourceZoom
       tileUrlFor: root.radarTileUrlB
-      revision: root.frameB + (root.colorSchemeId * 1000)
+      revision: root.frameB + (root.colorSchemeId * 1000) + (root.frameEpoch * 100000)
       smooth: root.smoothTiles
       opacity: root.frontIsA ? 0 : 1
       Behavior on opacity {
@@ -218,6 +225,23 @@ Item {
     }
 
     // ---- Overlays -------------------------------------------------------
+    // The same affordance every map has, because the keyboard shortcut for it
+    // is not discoverable and someone who has panned away has no other way
+    // back short of retyping their city.
+    Button {
+      anchors.left: parent.left
+      anchors.bottom: parent.bottom
+      anchors.margins: Style.space(6)
+      visible: root.hasLocation
+      text: Glyphs.RECENTER
+      fontFamily: Style.font.family
+      foreground: root.foreground
+      background: Color.popups.background
+      bordered: true
+      tooltipText: "Centre on your location (Home)"
+      onClicked: root.recenterRequested()
+    }
+
     Text {
       anchors.right: parent.right
       anchors.bottom: parent.bottom

@@ -15,7 +15,8 @@ const REGISTRY = {
   PLAY: [0xF040A, "md-play"],
   PAUSE: [0xF03E4, "md-pause"],
   PENCIL: [0xF03EB, "md-pencil"],
-  PROGRESS_CLOCK: [0xF0996, "md-progress_clock"]
+  PROGRESS_CLOCK: [0xF0996, "md-progress_clock"],
+  RECENTER: [0xF01A4, "md-crosshairs_gps"]
 }
 
 test("every glyph is exactly one character", () => {
