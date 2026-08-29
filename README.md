@@ -311,17 +311,54 @@ appears to do nothing is usually an edit that was never loaded.
 
 ### Layout
 
+Everything that is a plain function lives in `lib/` and is tested; everything
+that needs the shell to exist lives in a `.qml` file and is not.
+
 | File | |
 | --- | --- |
 | `Service.qml` | headless singleton: frame manifest, forecast polling, alert decisions |
-| `Panel.qml` | the map, timeline, city picker and alert controls |
+| `Panel.qml` | panel state and lifecycle; composes the pieces below |
 | `BarWidget.qml` | the bar pill |
-| `TileLayer.qml` | one raster layer of an XYZ tile map |
-| `TileMath.js` | Web Mercator projection, distance and bearing |
-| `RadarModel.js` | RainViewer endpoints, parsing, thresholds, sampling |
+| `ui/RadarMap.qml` | basemap, radar layers, alert rings, pan and zoom |
+| `ui/TileLayer.qml` | one raster layer of an XYZ tile map |
+| `ui/CoverageProbe.qml` | reads the coverage mask to answer "is there radar here" |
+| `ui/Timeline.qml` | play/pause and the frame scrubber |
+| `ui/LocationPicker.qml` | the city row and its search results |
+| `ui/AlertControls.qml` | the alert switch, radius and threshold |
+| `ui/SettingRow.qml` | one labelled row of the control stack |
+| `lib/TileMath.js` | Web Mercator projection, distance and bearing |
+| `lib/RadarModel.js` | RainViewer endpoints, parsing, echo analysis, sampling |
+| `lib/Alerts.js` | intensity bands, forecast reduction, the notification latch |
+| `lib/Settings.js` | reading and coercing the widget's settings |
+| `lib/Glyphs.js` | every Nerd Font glyph the plugin draws |
 
 A bar widget is instantiated once per monitor, so anything that polls belongs in
 the service, which the shell mounts exactly once per plugin.
+
+### Tests
+
+The files in `lib/` are QML `.pragma library` files, which are plain JavaScript
+once the QML-only directives are stripped. `test/load.js` does the stripping and
+runs the real file, so the tests exercise what the shell loads rather than a
+copy of it. No dependencies, and Node's own runner:
+
+```bash
+node --test
+```
+
+They cover the projection, the RainViewer and Open-Meteo parsing, the alert
+bands and latch, the settings coercion, and the glyph codepoints. Some of them
+pin bugs that have already been fixed once.
+
+QML is checked statically, which needs the shell's modules on the import path:
+
+```bash
+qmllint -I /usr/share/omarchy/shell -I . *.qml ui/*.qml
+```
+
+`Panel.qml` fails this on the typed function signatures inside its `IpcHandler`,
+which Quickshell requires and this `qmllint` cannot parse. The other files are
+clean.
 
 ## Licence
 

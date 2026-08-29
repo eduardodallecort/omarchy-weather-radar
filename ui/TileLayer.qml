@@ -1,10 +1,10 @@
 import QtQuick
-import "TileMath.js" as TileMath
+import "../lib/TileMath.js" as TileMath
 
 // One raster layer of an XYZ tile map.
 //
-// The panel stacks these — a basemap and the radar frames on top — which is why
-// the geometry lives here instead of in the panel: every layer shares a centre
+// RadarMap stacks these — a basemap and the radar frames on top — which is why
+// the geometry lives here rather than up there: every layer shares a centre
 // and zoom, and any drift between them would show up as the rain sitting next
 // to the coastline instead of on it.
 //

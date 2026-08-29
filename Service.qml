@@ -1,7 +1,10 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
-import "RadarModel.js" as RadarModel
+import "lib/Glyphs.js" as Glyphs
+import "lib/Alerts.js" as Alerts
+import "lib/RadarModel.js" as RadarModel
+import "lib/Settings.js" as Settings
 
 // Headless singleton behind the radar plugin.
 //
@@ -35,33 +38,24 @@ Item {
   property var shell: null
   property var settings: ({})
 
-  function setting(name, fallback) {
-    var value = settings ? settings[name] : undefined
-    return value === undefined || value === null ? fallback : value
-  }
-
   // ---------------------------------------------------------------------------
   // Configuration
   // ---------------------------------------------------------------------------
 
-  // A widget is created before its settings are injected, so `settings` is an
-  // empty object for the first moments of a session. That state is "not known
-  // yet", not "alerts are off", and the two must not be confused: treating it
-  // as off makes the arrival of real settings look like the user switching
-  // alerts on, which re-arms the alert latch and can announce the same weather
-  // twice.
-  readonly property bool settingsReady: settings && Object.keys(settings).length > 0
-  readonly property bool alertsEnabled: settingsReady && setting("alertsEnabled", false) === true
-  readonly property int alertRadiusKm: Math.max(25, Math.min(250, Number(setting("alertRadiusKm", 100)) || 100))
-  readonly property string alertThreshold: String(setting("alertMinIntensity", "Heavy"))
+  // Coercion lives in Settings.js, which the panel reads through as well.
+  // Clamping the same value in two places is two chances to disagree about it,
+  // and the pair that would disagree here decides what gets a notification.
+  readonly property bool settingsReady: Settings.isReady(settings)
+  readonly property bool alertsEnabled: Settings.alertsEnabled(settings)
+  readonly property int alertRadiusKm: Settings.alertRadiusKm(settings)
+  readonly property string alertThreshold: Settings.alertThreshold(settings)
 
-  // Storms in most of the world travel somewhere around 50 km/h, so the alert
-  // radius doubles as a lead time: 100 km is roughly two hours of warning.
-  // Expressing it this way means one setting controls both the ring drawn on
-  // the map and how far ahead the forecast is inspected.
-  readonly property real assumedStormSpeedKmh: 50
-  readonly property int leadMinutes: Math.round(alertRadiusKm / assumedStormSpeedKmh * 60)
-  readonly property int forecastSlots: Math.max(4, Math.min(24, Math.ceil(leadMinutes / 15)))
+  // The alert radius doubles as a lead time — the conversion assumes a storm
+  // speed, and lives in Alerts.js with the bands it feeds. One setting
+  // therefore controls both the ring drawn on the map and how far ahead the
+  // forecast is inspected.
+  readonly property int leadMinutes: Alerts.leadMinutesFor(alertRadiusKm)
+  readonly property int forecastSlots: Alerts.forecastSlotsFor(leadMinutes)
 
   // ---------------------------------------------------------------------------
   // Location
@@ -293,63 +287,7 @@ Item {
   property real outlookCape: 0
   property real outlookGust: 0
 
-  readonly property string outlookLabel: levelName(outlookLevel)
-
-  function levelName(level) {
-    if (level >= 4) return "Severe"
-    if (level >= 3) return "Heavy"
-    if (level >= 2) return "Moderate"
-    if (level >= 1) return "Light"
-    return "Clear"
-  }
-
-  function levelValue(name) {
-    var normalized = String(name || "").toLowerCase()
-    if (normalized === "severe") return 4
-    if (normalized === "heavy") return 3
-    if (normalized === "moderate") return 2
-    if (normalized === "light") return 1
-    return 0
-  }
-
-  // Bands are rain rate in mm/h, not millimetres per slot. Two reasons: mm/h is
-  // the unit the published intensity scale uses, so "heavy" here means what it
-  // means elsewhere; and a per-slot figure silently depends on the slot length.
-  //
-  // The thresholds follow the standard scale — light under 2.5 mm/h, moderate
-  // to 7.6, heavy above that — and were checked against the data rather than
-  // assumed. Across 2144 forecast samples over the Sahel, the Amazon, the
-  // United States, Indonesia and India, wet slots ran to a maximum of 9.6 mm/h
-  // with the 99th percentile at 7.6, so Heavy sits where genuinely heavy rain
-  // sits and Severe is reserved for a deluge or for the promotion below.
-  //
-  // Those figures are worth keeping in view when adjusting these: bands set
-  // above the range the source actually produces yield an alert that never
-  // fires, which is indistinguishable from fair weather and therefore the one
-  // failure this plugin cannot afford.
-  function levelForPrecipitation(mmPerSlot) {
-    var mmPerHour = mmPerSlot * 4
-    if (mmPerHour >= 15.0) return 4
-    if (mmPerHour >= 7.6) return 3
-    if (mmPerHour >= 2.5) return 2
-    if (mmPerHour >= 0.5) return 1
-    return 0
-  }
-
-  // CAPE measures the energy available for convection; gusts measure what the
-  // atmosphere is already doing with it. Rain alone does not make weather
-  // severe — rain arriving into an unstable airmass does — so this promotes an
-  // already-rainy slot one band rather than firing on its own.
-  //
-  // Calibrated against forecasts for 268 points across the world's convective
-  // regions, where gusts reach the 99th percentile at 55 km/h and top out at
-  // 63. A rule requiring high gusts *alongside* instability therefore asks for
-  // a value the model barely produces and matches almost nothing, so strong
-  // instability qualifies on its own at 2000 J/kg, with a second arm for
-  // windier setups that are less unstable.
-  function severeConditions(cape, gust) {
-    return cape >= 2000 || (cape >= 1000 && gust >= 45)
-  }
+  readonly property string outlookLabel: Alerts.levelName(outlookLevel)
 
   function checkNow() {
     if (!hasLocation || checking) return
@@ -424,89 +362,20 @@ Item {
     }
   }
 
-  // Reduce one sampled point to the worst thing it forecasts inside the lead
-  // window. Returns null for a response that carries no usable series.
-  function summarizePoint(entry, peakCape, peakGust) {
-    if (!entry || !entry.minutely_15) return null
-
-    var precipitation = entry.minutely_15.precipitation || []
-    var times = entry.minutely_15.time || []
-
-    var level = 0
-    var lead = 0
-    var peak = 0
-    var clock = ""
-
-    for (var i = 0; i < precipitation.length && i < forecastSlots; i++) {
-      var mm = Number(precipitation[i]) || 0
-      if (mm > peak) peak = mm
-      var slotLevel = levelForPrecipitation(mm)
-      if (slotLevel === 0) continue
-      // Precipitation into an unstable airmass is what turns a shower into a
-      // storm; promote one band when the environment supports it.
-      if (slotLevel >= 2 && severeConditions(peakCape, peakGust)) slotLevel = Math.min(4, slotLevel + 1)
-      if (slotLevel > level) {
-        level = slotLevel
-        // Index 0 is the 15-minute slot already under way, so it reads as now.
-        lead = i * 15
-        // Taken from the response rather than computed as now-plus-lead, so
-        // the stated time is the model's own slot and cannot drift.
-        clock = clockFromTimestamp(times[i])
-      }
-    }
-
-    return { level: level, lead: lead, peak: peak, clock: clock }
-  }
-
-  function peakOf(series) {
-    var highest = 0
-    if (!series) return highest
-    for (var i = 0; i < series.length; i++) highest = Math.max(highest, Number(series[i]) || 0)
-    return highest
-  }
-
   function applyForecast(data) {
-    // One coordinate returns an object, several return an array. Normalising
-    // here keeps the rest of the function indifferent to how many were asked
-    // for.
-    var entries = Array.isArray(data) ? data : [data]
-    if (entries.length === 0) return
-
-    // Instability is a property of the airmass rather than of any one grid
-    // cell, so it is taken across the whole sampled area before the bands are
-    // applied — the same promotion then holds for every point.
-    var peakCape = 0
-    var peakGust = 0
-    for (var e = 0; e < entries.length; e++) {
-      if (!entries[e] || !entries[e].hourly) continue
-      peakCape = Math.max(peakCape, peakOf(entries[e].hourly.cape))
-      peakGust = Math.max(peakGust, peakOf(entries[e].hourly.wind_gusts_10m))
-    }
-
-    // The worst of the sampled points wins, and among equals the soonest. A
-    // town is not a point: reporting the centre alone would stay quiet through
-    // a storm sitting over the far side of it.
-    var worst = null
-    var peak = 0
-    for (var p = 0; p < entries.length; p++) {
-      var summary = summarizePoint(entries[p], peakCape, peakGust)
-      if (!summary) continue
-      peak = Math.max(peak, summary.peak)
-      if (!worst
-          || summary.level > worst.level
-          || (summary.level === worst.level && summary.lead < worst.lead)) {
-        worst = summary
-      }
-    }
-    if (!worst) return
+    var outlook = Alerts.summarizeForecast(data, forecastSlots)
+    // Null means the response carried nothing usable. Keeping the previous
+    // outlook is right; overwriting it with zeros would report fair weather on
+    // the strength of a broken response.
+    if (!outlook) return
 
     forecast = data
-    outlookCape = peakCape
-    outlookGust = peakGust
-    outlookPrecipitation = peak
-    outlookLeadMinutes = worst.lead
-    outlookAtClock = worst.clock
-    outlookLevel = worst.level
+    outlookCape = outlook.cape
+    outlookGust = outlook.gust
+    outlookPrecipitation = outlook.precipitation
+    outlookLeadMinutes = outlook.leadMinutes
+    outlookAtClock = outlook.clock
+    outlookLevel = outlook.level
     lastCheckTime = Date.now()
 
     evaluateAlert()
@@ -522,121 +391,36 @@ Item {
   property int notifiedLevel: 0
 
   function evaluateAlert() {
-    if (!alertsEnabled) {
-      notifiedLevel = 0
-      return
-    }
-
-    var threshold = levelValue(alertThreshold)
-
-    if (outlookLevel < threshold) {
-      // Clear the latch only once conditions drop under the threshold, so a
-      // reading that flickers around the boundary cannot re-notify.
-      notifiedLevel = 0
-      return
-    }
-
-    if (outlookLevel <= notifiedLevel) return
-
-    notifiedLevel = outlookLevel
-    notify(outlookLevel, outlookLeadMinutes)
+    var decision = Alerts.decideNotification(outlookLevel, notifiedLevel, alertThreshold, alertsEnabled)
+    notifiedLevel = decision.notifiedLevel
+    if (decision.notify) notify()
   }
 
-  // The figures behind a severe alert, naming only the ones that put it there.
-  //
-  // A severe reading can arrive by two routes — rain heavy enough on its own,
-  // or ordinary rain into an unstable airmass — and each is evidenced by
-  // different numbers. Printing all of them regardless produces sentences that
-  // argue against themselves: "severe storm, gusts to 17 km/h" reads as a
-  // contradiction, because a gust that mild had nothing to do with the verdict.
-  // Each figure appears only when it is part of the reason.
-  function severityDetail(level) {
-    if (level < 4) return ""
-
-    var reasons = []
-    var ratePerHour = outlookPrecipitation * 4
-    if (ratePerHour >= 15.0) reasons.push("up to " + Math.round(ratePerHour) + " mm/h")
-    if (outlookCape >= 2000) reasons.push("CAPE " + Math.round(outlookCape) + " J/kg")
-    if (outlookGust >= 45) reasons.push("gusts to " + Math.round(outlookGust) + " km/h")
-
-    return reasons.length > 0 ? " — " + reasons.join(", ") : ""
-  }
-
-  function notify(level, lead) {
-    var name = levelName(level)
-
-    // Already under way reads differently from on its way. This is the normal
-    // case when someone turns alerts on during weather they can already see,
-    // where "approaching" would contradict the "starting now" beneath it.
-    var underway = lead <= 0
-    var headline = level >= 4
-      ? (underway ? "Severe storm overhead" : "Severe storm approaching")
-      : (underway ? name + " rain now" : name + " rain approaching")
-
-    // Both a relative and an absolute time. The relative one is what the eye
-    // wants at the moment the toast appears; the absolute one is what saves it
-    // from lying to someone who reads it later, or who was away from the desk
-    // when it arrived.
-    var whenText = underway ? "under way" : "in about " + humanizeMinutes(lead)
-    if (outlookAtClock !== "") whenText += underway ? " since " + outlookAtClock : ", around " + outlookAtClock
-
-    var description = whenText
-    if (locationName !== "") description += " at " + locationName
-    description += severityDetail(level)
-
-    // How long the toast stays. Omarchy gives a critical popup no expiry and
-    // caps everything else at thirty seconds, so "until dismissed" is only
-    // reachable through the urgency.
-    //
-    // Heavy and above therefore go out as critical. The value of an alert
-    // lies entirely in the moment nobody was looking, and a timed toast that
-    // fires while the desk is empty is a toast that never happened — which is
-    // the case the alert exists for. Heavy is also the default threshold, the
-    // level this plugin itself calls worth interrupting someone over, so
-    // letting it expire unseen would contradict that. The cost is one click.
-    //
-    // Critical here does not mean emergency. Omarchy only lets a popup through
-    // Do Not Disturb when the sender is CLI-style, and this one names itself,
-    // so a silenced session files these into history instead of showing
-    // them.
-    //
-    // Moderate and Light stay on the eight-second default. They are worth
-    // saying and not worth camping on the screen.
-    var persistent = level >= 3
-    var command = [
-      "omarchy-notification-send",
-      "--app-name", "Weather Radar",
-      // The same glyph the bar widget wears, so the toast is recognisably
-      // from this plugin before a word of it is read.
-      "-g", RadarModel.GLYPH,
-      "-u", persistent ? "critical" : "normal"
-    ]
+  function notify() {
+    var text = Alerts.notificationText({
+      level: outlookLevel,
+      leadMinutes: outlookLeadMinutes,
+      clock: outlookAtClock,
+      precipitation: outlookPrecipitation,
+      cape: outlookCape,
+      gust: outlookGust
+    }, locationName)
 
     // Deliberately no click action. A click on a toast means "I have seen
     // this, go away" to almost everyone, and taking that gesture to open a
     // window instead answers a question the reader did not ask: they have been
     // told it is going to rain, which is the whole point of telling them.
-    // Anyone who wants the map opens it themselves.
-    notifyProc.command = command.concat([headline, description])
+    notifyProc.command = [
+      "omarchy-notification-send",
+      "--app-name", "Weather Radar",
+      // The same glyph the bar widget wears, so the toast is recognisably from
+      // this plugin before a word of it is read.
+      "-g", Glyphs.RADAR,
+      "-u", text.urgency,
+      text.headline,
+      text.description
+    ]
     notifyProc.running = true
-  }
-
-  // Open-Meteo returns local ISO timestamps like "2026-08-15T20:15" because
-  // the request asks for timezone=auto, so the clock part is already in the
-  // user's own time and needs no conversion.
-  function clockFromTimestamp(value) {
-    var text = String(value || "")
-    var marker = text.indexOf("T")
-    if (marker === -1) return ""
-    return text.substring(marker + 1, marker + 6)
-  }
-
-  function humanizeMinutes(minutes) {
-    if (minutes < 60) return minutes + " min"
-    var hours = Math.floor(minutes / 60)
-    var rest = minutes % 60
-    if (rest === 0) return hours + "h"
-    return hours + "h" + (rest < 10 ? "0" + rest : rest)
   }
 
   Process {
@@ -753,7 +537,7 @@ Item {
     // so a relative figure would be up to ten minutes out of date on screen,
     // while a time stays correct between checks.
     var when = outlookAtClock !== "" ? outlookAtClock
-      : (outlookLeadMinutes <= 0 ? "now" : humanizeMinutes(outlookLeadMinutes))
+      : (outlookLeadMinutes <= 0 ? "now" : Alerts.humanizeMinutes(outlookLeadMinutes))
     return outlookLabel.toLowerCase() + " " + when
   }
 }
