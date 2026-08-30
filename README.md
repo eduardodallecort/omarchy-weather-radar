@@ -7,7 +7,7 @@ precipitation, and optionally be told when a storm is on its way.
 Works anywhere RainViewer has radar coverage, which is most of the populated
 world — no account and no API key.
 
-![The radar panel open on an Omarchy desktop, showing a line of storms across the Texas and Oklahoma panhandle with the alert rings drawn around the configured location](screenshots/desktop.webp)
+![The radar panel open on an Omarchy desktop, showing storms over Michigan and Lake Huron with the alert rings drawn around Detroit](screenshots/desktop.webp)
 
 > **Not a life-safety tool.** This plugin is informational. It shows
 > best-effort third-party radar with no availability guarantee, and it can be
@@ -72,7 +72,7 @@ configuration outside the widget's own entry is written.
 
 ## The map
 
-![The radar panel: a map of storms over Oklahoma with distance rings around the location, a timeline scrubber below it, the city name, and the alert controls for radius and threshold](screenshots/panel.webp)
+![The radar panel: storms over Michigan with distance rings around Detroit, a timeline scrubber below the map, then the location, the storm alert switch, and the radius and threshold choices](preview.webp)
 
 | | |
 | --- | --- |
@@ -98,7 +98,7 @@ a cycle behind theirs. Once you close it, the map asks for nothing.
 
 ### What the colours mean
 
-![Radar over Oklahoma and Texas: blue for light rain grading through yellow and orange to red and magenta cores, over a dark base map](screenshots/map.webp)
+![Radar over Michigan: blue for light rain grading through yellow and orange to red cores, over coastlines and place names drawn from the base map that ships with the plugin](screenshots/map.webp)
 
 Radar shows **precipitation**, not cloud. A completely overcast sky with no rain
 falling reads as an empty map — that is correct, not a fault. Warmer colours
@@ -177,7 +177,7 @@ Pressing Enter on text that matched nothing saves it as a name, which is what
 the stock weather widget wants — it resolves names itself. The radar cannot: it
 centres on a coordinate and fetches the forecast by coordinate. So a location
 saved that way is reported as having no coordinates, beside the city name and
-under the alert switch, rather than leaving the map quietly empty.
+under the STORM ALERTS heading, rather than leaving the map quietly empty.
 
 In a large city, name your neighbourhood rather than the city: São Paulo is some
 50 km across and its centre says nothing useful about the far side. The picker
@@ -251,11 +251,11 @@ presets.
 
 The forecast model runs on a grid roughly 8-10 km across, and a single
 coordinate speaks for whichever cell it lands in rather than for the place it
-names. Measured against Marmeleiro in Paraná: the town centre resolves to a cell
-3.8 km away, and a point 1 km south belongs to the next cell over.
+names. Measured against a small town: its centre resolves to a cell 3.8 km away,
+and a point 1 km south belongs to the next cell over.
 
 So each check samples five points — the centre and four at 5 km — and reports
-the worst. Around Marmeleiro that covers three model cells instead of one. All
+the worst. Around that town it covers three model cells instead of one. All
 five travel in a single request, so the coverage costs a larger response rather
 than more requests.
 
@@ -276,18 +276,20 @@ question and deserves an answer rather than ten minutes of silence:
 
 | | |
 | --- | --- |
+| Open the panel | asks again if the last attempt failed, or if the reading is older than the cycle |
 | Middle-click the bar icon | checks now, quietly — you are not re-notified |
 | Toggle alerts off and on | re-arms — you are told the current state |
 | Change the threshold | re-evaluates the reading already in hand |
 | Change the radius | fetches again, since the lead window moved |
 | Change the city | a new place has not been reported on yet |
 
-Switching the toggle off and on is therefore the closest thing to "tell me
-again".
+Those are two different questions. Opening the panel refreshes a reading that
+has gone stale or was failing; it does not tell you again about weather you have
+already been told about. Switching the toggle off and on is what does that.
 
 ### What the switch says
 
-The line under the storm alert switch reports what the watch is actually doing,
+The line under the STORM ALERTS heading reports what the watch is actually doing,
 because a quiet plugin and a broken one look the same otherwise:
 
 | | |
@@ -315,9 +317,9 @@ already holds.
 
 ### On screen
 
-![Notification reading "Severe storm approaching — in about 3h, around 22:45 at Chicago — up to 28 mm/h"](screenshots/alert-severe.webp)
+![Notification reading "Heavy rain approaching — in about 1h, around 23:30 at Mont-Laurier"](screenshots/alert-heavy.webp)
 
-![Notification reading "Heavy rain approaching — in about 2h30, around 21:45 at Minneapolis"](screenshots/alert-heavy.webp)
+![Notification reading "Moderate rain now — under way since 22:30 at Benton Harbor"](screenshots/alert-moderate.webp)
 
 | Level | Stays | |
 | --- | --- | --- |
@@ -400,7 +402,7 @@ that needs the shell to exist lives in a `.qml` file and is not.
 | `ui/Timeline.qml` | play/pause and the frame scrubber |
 | `ui/LocationPicker.qml` | the city row and its search results |
 | `ui/AlertControls.qml` | the alert switch, radius and threshold |
-| `ui/SettingRow.qml` | one labelled row of the control stack |
+| `ui/ChoiceSection.qml` | a heading, what it costs, and a row of equal buttons |
 | `lib/TileMath.js` | Web Mercator projection, distance and bearing |
 | `lib/RadarModel.js` | RainViewer endpoints, parsing, echo analysis, sampling |
 | `lib/Alerts.js` | intensity bands, forecast reduction, the latch, and what the panel says |

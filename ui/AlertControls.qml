@@ -5,7 +5,11 @@ import "../lib/Alerts.js" as Alerts
 
 // The storm alert controls, in the panel rather than only in the settings
 // form: turning the watch on is one click from the thing you are looking at,
-// the same shape as the audio panel's mute switch.
+// the way the audio panel keeps its mute switch beside the thing it mutes.
+//
+// Laid out as the network panel lays out its band section — a heading, the
+// switch that governs everything under it on the same line, and the choices
+// below.
 //
 // Nothing here writes a setting. Persisting belongs to the panel, which owns
 // the shell entry; this reports what the user asked for.
@@ -47,13 +51,51 @@ Column {
     outlookAtClock: radar ? radar.outlookAtClock : ""
   })
 
-  SettingRow {
+  // The heading and the line under it are one block, with the switch centred
+  // against the whole of it rather than against the heading alone. The two
+  // lines say what the watch is and what it is doing, which is a single thing;
+  // separating them by a section gap read as two, and left the switch floating
+  // beside the first.
+  Item {
     width: parent.width
-    bar: root.bar
-    label: "Storm alerts"
-    caption: root.alertStatus
+    implicitHeight: Math.max(alertsHeading.implicitHeight, alertsSwitch.implicitHeight)
 
+    Column {
+      id: alertsHeading
+      anchors.left: parent.left
+      anchors.right: alertsSwitch.left
+      anchors.rightMargin: Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(2)
+
+      PanelSectionHeader {
+        id: alertsHeader
+        text: "STORM ALERTS"
+        foreground: root.foreground
+        fontFamily: Style.font.family
+      }
+
+      // What the watch is actually doing. Aligned with the heading, like every
+      // other caption in the panel — it belongs to it rather than to the rows
+      // below.
+      Text {
+        width: parent.width
+        text: root.alertStatus
+        color: root.foreground
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        opacity: 0.55
+        elide: Text.ElideRight
+      }
+    }
+
+    // At the size the rest of the shell gives a switch. The network panel
+    // shrinks its own to the heading's font, which is right for a modifier
+    // qualifying the choice below it; this one is the panel's primary control.
     ToggleSwitch {
+      id: alertsSwitch
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
       checked: root.alertsEnabled
       busy: root.alertsEnabled && root.radar ? root.radar.checking : false
       foreground: root.foreground
@@ -63,25 +105,22 @@ Column {
 
   // Only while alerts are on: with them off there is nothing to tune, and the
   // rings this controls are not drawn either.
-  SettingRow {
+  // Only while alerts are on: with them off there is nothing to tune, and the
+  // rings these control are not drawn either.
+  ChoiceSection {
     width: parent.width
-    bar: root.bar
     visible: root.alertsEnabled
-    label: "Alert radius (km)"
+    bar: root.bar
+    title: "ALERT RADIUS"
     // The kilometres are what the rings show; the hours are what the number
     // actually means. Saying both keeps the control honest about being an
     // approximation.
     caption: "about " + Alerts.humanizeLead(root.alertLeadMinutes) + " of warning"
-
-    ButtonGroup {
-      options: root.radiusPresets
-      value: String(root.alertRadiusKm)
-      foreground: root.foreground
-      background: root.background
-      onChanged: function(value) {
-        var km = parseInt(value, 10)
-        if (isFinite(km) && km !== root.alertRadiusKm) root.radiusChosen(km)
-      }
+    options: root.radiusPresets
+    value: String(root.alertRadiusKm)
+    onChosen: function(picked) {
+      var km = parseInt(picked, 10)
+      if (isFinite(km) && km !== root.alertRadiusKm) root.radiusChosen(km)
     }
   }
 
@@ -89,21 +128,16 @@ Column {
   // be to be worth interrupting for. Without it, a two-hour window in a wet
   // season would fire on every passing shower, and the plugin would be
   // switched off — taking the alert that mattered with it.
-  SettingRow {
+  ChoiceSection {
     width: parent.width
-    bar: root.bar
     visible: root.alertsEnabled
-    label: "Notify me about"
+    bar: root.bar
+    title: "NOTIFY ME ABOUT"
     caption: Alerts.thresholdCaption(root.alertThreshold)
-
-    ButtonGroup {
-      options: root.thresholdOptions
-      value: root.alertThreshold
-      foreground: root.foreground
-      background: root.background
-      onChanged: function(value) {
-        if (value !== root.alertThreshold) root.thresholdChosen(value)
-      }
+    options: root.thresholdOptions
+    value: root.alertThreshold
+    onChosen: function(picked) {
+      if (picked !== root.alertThreshold) root.thresholdChosen(picked)
     }
   }
 }

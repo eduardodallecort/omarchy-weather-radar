@@ -51,7 +51,6 @@ Column {
     Row {
       visible: !root.editing
       anchors.left: parent.left
-      anchors.leftMargin: Style.space(12)
       anchors.verticalCenter: parent.verticalCenter
       spacing: Style.space(8)
 
@@ -115,7 +114,6 @@ Column {
     Row {
       visible: root.editing
       anchors.left: parent.left
-      anchors.leftMargin: Style.space(12)
       anchors.verticalCenter: parent.verticalCenter
       spacing: Style.space(6)
 
@@ -208,7 +206,7 @@ Column {
         Row {
           id: suggestionRow
           anchors.left: parent.left
-          anchors.leftMargin: Style.space(16)
+          anchors.leftMargin: Style.space(6)
           anchors.verticalCenter: parent.verticalCenter
           spacing: Style.space(8)
 

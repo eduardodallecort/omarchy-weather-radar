@@ -15,8 +15,8 @@ import "lib/RadarModel.js" as RadarModel
 // Opens centred on the location Omarchy already knows about, stacks the latest
 // radar frame over a basemap, and can play the last two hours as a loop. The
 // alert toggle lives down here rather than only in the settings form, so
-// turning the watch on is one click from the thing you are looking at — the
-// same shape as the audio panel's mute switch.
+// turning the watch on is one click from the thing you are looking at, the way
+// the audio panel keeps its mute switch beside the thing it mutes.
 //
 // This file owns the state the pieces in ui/ share — where the map is looking,
 // which frame is on screen, what is being edited — plus the lifecycle, the
@@ -697,10 +697,20 @@ Panel {
 
         PanelSeparator { width: parent.width }
 
+        // Separator, then a small-caps heading at the content edge, then the
+        // rows inset under it. That rail is the shape every dense first-party
+        // panel is built on — audio, network, power, bluetooth — and without
+        // it a panel reads as a stack of controls rather than as one of theirs.
+        PanelSectionHeader {
+          text: "LOCATION"
+          foreground: root.bar ? root.bar.foreground : Color.foreground
+          fontFamily: Style.font.family
+        }
+
         LocationPicker {
           id: locationPicker
           width: parent.width
-          spacing: parent.spacing
+          spacing: Style.space(6)
           bar: root.bar
           locationName: root.locationName
           locationState: root.locationState
@@ -723,7 +733,8 @@ Panel {
 
         AlertControls {
           width: parent.width
-          spacing: parent.spacing
+          // Sections need more air between them than rows do inside one.
+          spacing: Style.space(12)
           bar: root.bar
           radar: root.radar
           alertsEnabled: root.alertsEnabled
