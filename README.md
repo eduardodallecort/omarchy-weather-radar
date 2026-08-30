@@ -455,7 +455,42 @@ ceiling on each. A plugin runs inside the process that owns the bar, the panels
 and the lock screen, so a stream added later without a limit fails the suite
 rather than turning up in a review.
 
-QML is checked statically, which needs the shell's modules on the import path:
+`test/qml-source.test.js` is the same kind of check aimed at the QML: that every
+`Text` declares `Text.PlainText`, and that the place name reaching the
+notification body is made inert first. Both are claims about source, which is
+why `test/text-format.sh` below renders them and measures what Qt actually does.
+
+Two more run the QML itself, under Quickshell rather than in Node. Both skip
+where there is no `qs`, and `RADAR_REQUIRE_QS=1` turns that skip into a failure,
+which is what CI sets:
+
+```bash
+./test/first-run.sh     # a machine that has never set a weather location
+./test/text-format.sh   # a place name cannot make the shell fetch a URL
+```
+
+The first loads the real `Service.qml` against a home directory that does not
+exist, with `curl` and `omarchy-weather-location` replaced so nothing reaches
+the network. It exists for a gap the code can only assert in a comment: the
+location file is watched, but a watch reaches no further than the directory
+holding it, and on a fresh machine that directory has never been created — so
+the first location ever written is invisible to the watch meant to notice it.
+What closes the gap is the panel calling `reloadLocation()` after a save, and
+nothing but this notices if that call is removed.
+
+The second renders hostile strings under Qt and watches a socket. QML's `Text`
+defaults to `Text.AutoText`, which decides per string whether it is markup, so a
+place name shaped like an `<img>` tag is fetched over the network by the process
+that owns the bar, the panels and the lock screen. Every `Text` here declares
+`Text.PlainText`; the notification body cannot, because Omarchy's own card
+renders it as `Text.StyledText`, so the name goes through `Alerts.inertText`
+first.
+
+Only `Service.qml` can run on a runner. `Panel.qml` and `BarWidget.qml` import
+`qs.Commons` and `qs.Ui`, which exist only inside the shell.
+
+QML is also checked statically, which needs the shell's modules on the import
+path:
 
 ```bash
 qmllint -I /usr/share/omarchy/shell -I . *.qml ui/*.qml

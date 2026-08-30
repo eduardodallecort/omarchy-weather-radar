@@ -1,17 +1,21 @@
 name: CI
 
-# Two things run here, and neither needs Omarchy installed.
+# Three things run here, and none needs Omarchy installed.
 #
 # The unit tests cover the projection, the RainViewer and Open-Meteo parsing,
 # the alert bands and the settings coercion — everything that lives in `lib/`
-# as a plain function. The listing checks cover what the marketplace
-# re-verifies every day for as long as the plugin stays listed: a repository
-# that fails them loses its install button within a day, silently.
+# as a plain function. The QML job runs `Service.qml` itself under Quickshell,
+# which is the only check that the shell-facing half of the plugin is even
+# loadable. The listing checks cover what the marketplace re-verifies every day
+# for as long as the plugin stays listed: a repository that fails them loses
+# its install button within a day, silently.
 #
-# What is deliberately absent: qmllint and `omarchy plugin validate`. Both need
-# the shell's own QML modules on the import path, which do not exist on a
-# runner, so a job pretending to check them would only ever report that it
-# could not resolve the imports.
+# What is deliberately absent: qmllint, `omarchy plugin validate`, and any
+# exercise of `Panel.qml` or `BarWidget.qml`. All three need the shell's own
+# `qs.Commons` and `qs.Ui` on the import path, which do not exist on a runner,
+# so a job pretending to check them would only ever report that it could not
+# resolve the imports. `Service.qml` imports nothing but QtQuick and
+# Quickshell, which is why it alone can run here.
 
 on:
   push:
@@ -39,6 +43,45 @@ jobs:
 
       - name: Run the library tests
         run: node --test
+
+  qml:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      # `extra`, not the AUR, so this is one package and no build. python is
+      # for the listener in test/text-format.sh; qml6 arrives with Quickshell's
+      # own dependency on qt6-declarative.
+      - name: Install Quickshell
+        run: pacman -Syu --noconfirm --needed quickshell git python
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # No compositor and no session: the service opens no windows, so it runs
+      # against the offscreen platform with a runtime directory of its own.
+      # `curl` and `omarchy-weather-location` are replaced inside the script,
+      # so nothing here reaches Open-Meteo or RainViewer.
+      - name: A machine that has never set a weather location
+        env:
+          QT_QPA_PLATFORM: offscreen
+          XDG_RUNTIME_DIR: /tmp/runtime
+          # The script skips when there is no `qs`, which is right for someone
+          # running the suite on a machine without Quickshell and wrong here:
+          # it would report success for a check it never ran.
+          RADAR_REQUIRE_QS: "1"
+        run: |
+          mkdir -p /tmp/runtime
+          ./test/first-run.sh
+
+      # test/qml-source.test.js establishes that every Text declares
+      # Text.PlainText and that the notification body makes the place name
+      # inert. That is source inspection. This renders those strings under Qt
+      # and watches a socket, so the claim rests on what Qt does.
+      - name: A place name cannot make the shell fetch a URL
+        env:
+          QT_QPA_PLATFORM: offscreen
+          XDG_RUNTIME_DIR: /tmp/runtime
+          RADAR_REQUIRE_QS: "1"
+        run: ./test/text-format.sh
 
   listable:
     runs-on: ubuntu-latest
