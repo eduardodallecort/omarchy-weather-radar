@@ -318,15 +318,36 @@ test("a single point may arrive as an object rather than an array", () => {
   assert.strictEqual(outlook.level, Alerts.HEAVY)
 })
 
-test("the reported peak is the wettest slot anywhere in the sample", () => {
+test("the reported rate is the wettest sampled point, not the driest", () => {
   const outlook = Alerts.summarizeForecast([forecast([1]), forecast([12])], 4)
   assert.ok(Math.abs(Alerts.ratePerHour(outlook.precipitation) - 12) < 1e-9)
+})
+
+test("the rate reported is the rate in the slot being warned about", () => {
+  // Heavy rain at 20:15 into an unstable hour is promoted to severe; a real
+  // downpour follows at 21:00, in air that is not. Both slots read severe, so
+  // the sooner one is reported — and the figures printed beside it have to be
+  // that slot's. Taking the window's wettest instead attributed the later
+  // downpour's rate to the shower, and severityDetail printed it as the
+  // reason: the same fault as reading instability across the whole window.
+  const outlook = Alerts.summarizeForecast(
+    forecast([0, 8, 0, 0, 24], { capeByHour: [2500, 0] }), 5)
+
+  assert.strictEqual(outlook.level, Alerts.SEVERE)
+  assert.strictEqual(outlook.leadMinutes, 15, "the promoted shower is the sooner of the two")
+  assert.ok(Math.abs(Alerts.ratePerHour(outlook.precipitation) - 8) < 1e-9,
+    "8 mm/h is what falls at 20:15; 24 mm/h belongs to an hour not being reported")
+
+  const text = Alerts.notificationText(outlook, "Detroit")
+  assert.ok(text.description.indexOf("mm/h") === -1,
+    "and no rate is claimed as the reason, because the rain alone was not severe")
+  assert.ok(text.description.indexOf("CAPE 2500") !== -1, "the instability that promoted it is")
 })
 
 test("a garbled number in the series is read as no rain, not as NaN", () => {
   const entry = { minutely_15: { precipitation: [null, "abc", undefined, slot(9)], time: [] } }
   const summary = point(entry, 4)
-  assert.ok(Number.isFinite(summary.peak))
+  assert.ok(Number.isFinite(summary.rain))
   assert.strictEqual(summary.level, Alerts.HEAVY, "the one real value still counts")
   assert.strictEqual(summary.lead, 45, "and it is placed in its own slot")
 })
