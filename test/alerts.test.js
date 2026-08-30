@@ -348,3 +348,117 @@ test("an alert worth interrupting someone over does not expire unseen", () => {
   assert.strictEqual(urgency(Alerts.HEAVY), "critical", "Heavy is the default threshold")
   assert.strictEqual(urgency(Alerts.SEVERE), "critical")
 })
+
+// ------------------------------------------------------------------ refreshing
+
+const CADENCE = 600000   // the source publishes every ten minutes
+const FLOOR = 10000
+const NOW = 1788000000000
+
+function request(overrides) {
+  return Object.assign({
+    now: NOW, lastAnswer: NOW - 30000, lastReading: NOW - 30000,
+    failing: false, floor: FLOOR, cadence: CADENCE
+  }, overrides)
+}
+
+test("opening the map refreshes a forecast that has been failing", () => {
+  assert.strictEqual(Alerts.shouldRetryForecast(request({ failing: true })), true)
+  assert.strictEqual(Alerts.shouldRetryForecast(request({ lastAnswer: 0, lastReading: 0 })), true,
+    "nothing has ever come back")
+})
+
+test("a reading younger than the source's own cadence is left alone", () => {
+  // Asking again inside the publish cycle is a request for bytes already held.
+  assert.strictEqual(Alerts.shouldRetryForecast(request()), false)
+})
+
+test("a reading older than the cadence is refreshed when the map opens", () => {
+  const stale = NOW - CADENCE - 1
+  assert.strictEqual(
+    Alerts.shouldRetryForecast(request({ lastAnswer: stale, lastReading: stale })), true)
+})
+
+test("repeated opening cannot turn into a request each time", () => {
+  assert.strictEqual(
+    Alerts.shouldRetryForecast(request({ failing: true, lastAnswer: NOW - 500 })), false)
+  assert.strictEqual(
+    Alerts.shouldRetryForecast(request({ failing: true, lastAnswer: NOW - FLOOR })), true,
+    "the floor is inclusive, so a retry is never one millisecond away forever")
+})
+
+test("reconnecting and reopening within a minute still refreshes", () => {
+  // Measured against a service driven offline and back: a minute-long floor
+  // swallowed the one retry that was actually asked for.
+  assert.strictEqual(
+    Alerts.shouldRetryForecast(request({ failing: true, lastAnswer: NOW - 15000 })), true)
+})
+
+test("a clock that jumped is a reason to refresh, not to wait", () => {
+  // An answer stamped in the future would otherwise refuse every refresh until
+  // real time caught up — hours, on a machine whose clock was wrong.
+  for (const failing of [true, false]) {
+    assert.strictEqual(
+      Alerts.shouldRetryForecast(request({ lastAnswer: NOW + 3600000, failing: failing })), true)
+  }
+})
+
+// ------------------------------------------------------------------ the caption
+
+function status(overrides) {
+  return Alerts.alertStatus(Object.assign({
+    alertsEnabled: true, locationState: "ready", checking: false, everAnswered: true,
+    failing: false, hasReading: true, outlookLevel: 0, outlookLabel: "Clear", outlookAtClock: ""
+  }, overrides))
+}
+
+test("the caption tells a quiet plugin apart from a broken one", () => {
+  assert.strictEqual(status({ alertsEnabled: false }), "off")
+  assert.strictEqual(status({ locationState: "unresolved" }), "the saved location has no coordinates")
+  assert.strictEqual(status({ locationState: "unset" }), "no location set")
+  assert.strictEqual(status({ checking: true }), "checking…")
+  assert.strictEqual(status({ everAnswered: false }), "starting…")
+  assert.strictEqual(status({ hasReading: false, failing: true }), "cannot reach the forecast")
+  assert.strictEqual(status({ hasReading: false }), "no forecast for this location")
+  assert.strictEqual(status({}), "nothing expected")
+  assert.strictEqual(status({ outlookLevel: 3, outlookLabel: "Heavy", outlookAtClock: "21:45" }),
+    "heavy expected around 21:45")
+})
+
+test("a reading in hand survives the checks behind it failing", () => {
+  // Replacing it with the error would trade something true and slightly old for
+  // nothing at all, and the reading is what somebody opened the panel to see.
+  assert.strictEqual(status({ failing: true }), "nothing expected · not updating")
+  assert.strictEqual(
+    status({ failing: true, outlookLevel: 3, outlookLabel: "Heavy", outlookAtClock: "21:45" }),
+    "heavy expected around 21:45 · not updating")
+})
+
+test("no two states of the watch say the same thing", () => {
+  const seen = new Set()
+  for (const overrides of [{ alertsEnabled: false }, { locationState: "unresolved" },
+                           { locationState: "unset" }, { checking: true },
+                           { everAnswered: false }, { hasReading: false, failing: true },
+                           { hasReading: false }, {}, { failing: true }]) {
+    const line = status(overrides)
+    assert.ok(line.length > 0, JSON.stringify(overrides))
+    assert.ok(!seen.has(line), `two states both say "${line}"`)
+    seen.add(line)
+  }
+})
+
+test("a switch that is off says so before anything else", () => {
+  // Whatever else is broken, the honest answer to "what is the watch doing" is
+  // "nothing, you turned it off".
+  assert.strictEqual(status({ alertsEnabled: false, locationState: "unset", failing: true }), "off")
+})
+
+test("a clock that jumped backwards after a reading still refreshes", () => {
+  // The guard covers both stamps. Either can be the one that outlives an NTP
+  // correction, and a reading stamped in the future would otherwise hold the
+  // map on it until real time caught up.
+  assert.strictEqual(Alerts.shouldRetryForecast(
+    request({ lastReading: NOW + 3600000 })), true)
+  assert.strictEqual(Alerts.shouldRetryForecast(
+    request({ lastAnswer: NOW - 20000, lastReading: NOW + 3600000 })), true)
+})

@@ -83,6 +83,11 @@ Item {
   readonly property bool hasLocation: location && location.valid === true
   readonly property string locationName: location ? location.name : ""
 
+  // "ready", "unresolved" or "unset" — see RadarModel.locationState. The middle
+  // one is a name typed with no city picked behind it, which the shared file
+  // stores happily and this plugin can do nothing with.
+  readonly property string locationState: RadarModel.locationState(location)
+
   FileView {
     id: locationFile
     path: Quickshell.env("HOME") + "/.local/state/omarchy/settings/weather.json"
@@ -159,8 +164,7 @@ Item {
       // carries across the move, and someone who changes city during weather
       // is told nothing because they were already told about somewhere else.
       notifiedLevel = 0
-      outlookLevel = 0
-      outlookAtClock = ""
+      discardReading()
     }
 
     if (hasLocation && alertsEnabled) checkNow()
@@ -347,7 +351,14 @@ Item {
   // ---------------------------------------------------------------------------
 
   property var forecast: null
+
+  // When a check last produced an outlook, and when one last came back at all.
+  // They are different questions: a request that fails, or answers with nothing
+  // usable in it, still happened. Without the second, "has not run yet" and
+  // "ran and could not tell you anything" look identical from outside — and the
+  // failure backoff means the second can last an hour.
   property double lastCheckTime: 0
+  property double lastAnswerTime: 0
   property bool checking: false
   property int consecutiveFailures: 0
 
@@ -367,6 +378,48 @@ Item {
   property real outlookGust: 0
 
   readonly property string outlookLabel: Alerts.levelName(outlookLevel)
+
+  // Everything the last check said, dropped together.
+  //
+  // A reading is about a place and a moment, and `lastCheckTime` is what the
+  // panel reads as "there is a reading". Clearing the outlook while leaving the
+  // timestamp behind leaves fair weather asserted for a city that has never
+  // been checked — which is the exact failure the wording elsewhere exists to
+  // prevent, arrived at from the other direction.
+  function discardReading() {
+    outlookLevel = 0
+    outlookLeadMinutes = 0
+    outlookAtClock = ""
+    outlookPrecipitation = 0
+    outlookCape = 0
+    outlookGust = 0
+    lastCheckTime = 0
+  }
+
+  // Retried from the panel when it opens. See Alerts.shouldRetryForecast for
+  // why only a failing check is retried.
+  //
+  // Seconds rather than the minute the manifest uses. The person this exists
+  // for has just reconnected and reopened the panel, which is a thing that
+  // happens well inside a minute — a floor long enough to catch them would
+  // refuse the one retry that was actually asked for. Overlapping requests are
+  // already impossible, so all this bounds is a burst from opening and closing
+  // repeatedly, and only while checks are failing, which is usually while there
+  // is no network for them to leave on.
+  readonly property int minRetryGapMs: 10000
+
+  function refreshIfStale() {
+    if (!alertsEnabled || !hasLocation || checking) return
+    if (!Alerts.shouldRetryForecast({
+      now: Date.now(),
+      lastAnswer: lastAnswerTime,
+      lastReading: lastCheckTime,
+      failing: consecutiveFailures > 0,
+      floor: minRetryGapMs,
+      cadence: RadarModel.FORECAST_INTERVAL_SEC * 1000
+    })) return
+    checkNow()
+  }
 
   function checkNow() {
     if (!hasLocation || checking) return
@@ -412,17 +465,37 @@ Item {
     // the door — the alert silently stopping for the rest of the session.
     property bool answered: false
 
+    // Set when this service stops the process itself. The exit code that
+    // follows is a cancellation, and counting it would inflate the failure
+    // backoff and tell the user the forecast cannot be reached because they
+    // turned the alerts off.
+    property bool cancelled: false
+
     onExited: function(exitCode) {
       answered = true
+      if (cancelled) {
+        cancelled = false
+        root.checking = false
+        return
+      }
       root.applyForecastResponse(exitCode, forecastOut.text)
     }
-    onRunningChanged: if (!running && !answered) root.applyForecastResponse(-1, "")
+    onRunningChanged: {
+      if (running || answered) return
+      if (cancelled) {
+        cancelled = false
+        root.checking = false
+        return
+      }
+      root.applyForecastResponse(-1, "")
+    }
 
     stdout: StdioCollector { id: forecastOut; waitForEnd: true }
   }
 
   function applyForecastResponse(exitCode, text) {
     checking = false
+    lastAnswerTime = Date.now()
 
     if (exitCode !== 0) {
       consecutiveFailures++
@@ -602,7 +675,9 @@ Item {
   onAlertsEnabledChanged: {
     if (!alertsEnabled) {
       notifiedLevel = 0
-      outlookLevel = 0
+      discardReading()
+      // Stopping the process produces an exit code, and it is not an outage.
+      if (forecastProc.running) forecastProc.cancelled = true
       forecastProc.running = false
       checking = false
     } else if (hasLocation) {
@@ -617,6 +692,9 @@ Item {
   readonly property string barSummary: {
     if (!hasLocation) return ""
     if (!alertsEnabled) return ""
+    // No reading at all while checks are failing is not fair weather. "clear"
+    // there would be the plugin's own silence dressed up as an answer.
+    if (lastCheckTime <= 0) return consecutiveFailures > 0 ? "unavailable" : ""
     if (outlookLevel === 0) return "clear"
     // Clock rather than countdown: the label only refreshes when a check runs,
     // so a relative figure would be up to ten minutes out of date on screen,

@@ -385,3 +385,28 @@ test("a host longer than any real one is rejected", () => {
   assert.strictEqual(RadarModel.isTileHost(long), false)
   assert.strictEqual(RadarModel.isTileHost("https://tilecache.rainviewer.com"), true)
 })
+
+test("a name with no coordinates is a state of its own, not an empty one", () => {
+  // The file is shared with the stock weather widget, which resolves names
+  // server-side, so a name alone is a legitimate thing to find there. This
+  // plugin cannot centre a map or fetch a forecast from one — and calling that
+  // "no location" would tell somebody nothing happened when something did.
+  const ready = RadarModel.parseLocationFile(
+    JSON.stringify({ name: "Marmeleiro", latitude: -26.1478, longitude: -53.0272 }))
+  const unresolved = RadarModel.parseLocationFile(JSON.stringify({ name: "Comsbao" }))
+  const unset = RadarModel.parseLocationFile("")
+
+  assert.strictEqual(RadarModel.locationState(ready), "ready")
+  assert.strictEqual(RadarModel.locationState(unresolved), "unresolved")
+  assert.strictEqual(RadarModel.locationState(unset), "unset")
+  assert.strictEqual(RadarModel.locationState(null), "unset")
+})
+
+test("coordinates that fail validation leave a name unresolved, not ready", () => {
+  for (const bad of [{ name: "x", latitude: 91, longitude: 0 },
+                     { name: "x", latitude: null, longitude: null },
+                     { name: "x", latitude: "abc", longitude: "def" }]) {
+    const parsed = RadarModel.parseLocationFile(JSON.stringify(bad))
+    assert.strictEqual(RadarModel.locationState(parsed), "unresolved", JSON.stringify(bad))
+  }
+})

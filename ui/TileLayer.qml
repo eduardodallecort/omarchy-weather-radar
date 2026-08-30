@@ -100,8 +100,10 @@ Item {
       smooth: root.smooth || root.sourceScale > 1
       fillMode: Image.Stretch
 
-      // A missing tile is normal at the edges of coverage and must not look
-      // like a rendering fault, so it simply stays invisible.
+      // A tile that has not arrived stays invisible rather than showing a
+      // placeholder, which would read as a rendering fault. Nothing is drawn
+      // for a tile with no data either, but that arrives as a transparent
+      // image rather than as an error.
       visible: status === Image.Ready
       onStatusChanged: if (status === Image.Error) root.tileFailed()
     }

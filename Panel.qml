@@ -6,7 +6,6 @@ import qs.Ui
 import "ui"
 import "lib/Alerts.js" as Alerts
 import "lib/Frames.js" as Frames
-import "lib/Glyphs.js" as Glyphs
 import "lib/Settings.js" as Settings
 import "lib/TileMath.js" as TileMath
 import "lib/RadarModel.js" as RadarModel
@@ -108,6 +107,7 @@ Panel {
 
   onRadarChanged: updateHome()
   readonly property string locationName: radar ? radar.locationName : ""
+  readonly property string locationState: radar ? radar.locationState : "unset"
 
   property real viewLatitude: 0
   property real viewLongitude: 0
@@ -486,6 +486,17 @@ Panel {
       root.radar.acquireManifest()
       manifestHeld = true
     }
+
+    // Opening the map is a request for current information, and the frames are
+    // not the only thing that can have gone stale or started failing while it
+    // was closed.
+    if (root.radar && root.radar.refreshIfStale) root.radar.refreshIfStale()
+
+    // Ask the tile layers to fetch again. Qt never retries an Image that
+    // failed, and the frame list can be current while the tiles under it were
+    // requested during an outage. Anything already held is served from the
+    // cache, so this costs a request only for what is actually missing.
+    frameEpoch++
     // The canvas can only read pixels while it is on screen, so opening is
     // the moment to ask.
     Qt.callLater(function() { coverageProbe.probe() })
@@ -629,6 +640,7 @@ Panel {
           alertRadiusKm: root.alertRadiusKm
 
           loading: root.frames.length === 0
+          radarUnavailable: root.radar ? root.radar.frameFailures > 0 : false
           attribution: root.attribution
 
           onDragged: function(latitude, longitude) {
@@ -651,7 +663,7 @@ Panel {
             // panning — otherwise the next location update would snap the map
             // back. Zooming on the centre moves nothing and must not.
             var constrained = TileMath.constrainLatitude(latitude, zoom, root.mapHeight)
-            if (constrained !== root.viewLatitude || wrapped !== root.viewLongitude) {
+            if (!TileMath.samePosition(constrained, wrapped, root.viewLatitude, root.viewLongitude)) {
               root.viewLatitude = constrained
               root.viewLongitude = wrapped
               root.panned = true
@@ -691,6 +703,7 @@ Panel {
           spacing: parent.spacing
           bar: root.bar
           locationName: root.locationName
+          locationState: root.locationState
           coverageMissing: root.coverageMissing
           editing: root.editingLocation
           saving: root.savingLocation
@@ -714,7 +727,7 @@ Panel {
           bar: root.bar
           radar: root.radar
           alertsEnabled: root.alertsEnabled
-          hasLocation: root.hasLocation
+          locationState: root.locationState
           alertLeadMinutes: root.alertLeadMinutes
           alertRadiusKm: root.alertRadiusKm
           radiusPresets: root.radiusPresets

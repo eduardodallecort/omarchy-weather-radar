@@ -58,6 +58,17 @@ Item {
   // second does not read as "no rain".
   property bool loading: false
 
+  // Whether the frame list is absent because fetching it failed rather than
+  // because it has not arrived yet. An empty map that says it is loading, for
+  // as long as the network is down, is the wrong half of that.
+  //
+  // Only the list. Whether the tiles under it can be fetched is deliberately
+  // not reported: the layers cache by URL, so a map holding frames it fetched
+  // before goes on drawing them with no network at all — correctly, and with
+  // the frame's own time under it. Counting tile errors flagged that healthy
+  // case as an outage while missing the one it was written for.
+  property bool radarUnavailable: false
+
   property string attribution: ""
 
   signal dragged(real latitude, real longitude)
@@ -89,6 +100,7 @@ Item {
     }
 
     TileLayer {
+      id: radarA
       anchors.fill: parent
       centerLatitude: root.centerLatitude
       centerLongitude: root.centerLongitude
@@ -104,6 +116,7 @@ Item {
     }
 
     TileLayer {
+      id: radarB
       anchors.fill: parent
       centerLatitude: root.centerLatitude
       centerLongitude: root.centerLongitude
@@ -256,7 +269,7 @@ Item {
     Text {
       anchors.centerIn: parent
       visible: root.loading
-      text: "Loading radar…"
+      text: root.radarUnavailable ? "Radar unavailable" : "Loading radar…"
       color: root.foreground
       font.family: Style.font.family
       font.pixelSize: Style.font.body

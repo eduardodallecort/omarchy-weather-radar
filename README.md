@@ -144,6 +144,17 @@ Large parts of the world have no ground radar at all, and there an empty map
 means "nothing is known" rather than "nothing is falling". When your location is
 outside coverage, the panel says so beside the city name.
 
+### When the map has nothing to draw
+
+An empty radar reads as "it is not raining", so the map says which of the two it
+is: `Loading radar…` while the frames are on their way, and `Radar unavailable`
+when fetching them failed and there are none.
+
+With frames already in hand it keeps drawing them, with no network at all — the
+images are cached by URL, so the last two hours stay on screen and the timeline
+underneath says which moment each one is. Opening the panel asks for anything
+missing, so reconnecting clears it without a restart.
+
 ## Location
 
 Click the city name at the bottom of the panel and type to search.
@@ -160,9 +171,13 @@ The location lives in `~/.local/state/omarchy/settings/weather.json`, owned by
 omarchy-weather-location
 ```
 
-Clearing it returns the weather widget to IP auto-detection. The radar needs
-coordinates to centre on, so it shows a world view until a city with
-coordinates is chosen.
+Clearing it returns the weather widget to IP auto-detection.
+
+Pressing Enter on text that matched nothing saves it as a name, which is what
+the stock weather widget wants — it resolves names itself. The radar cannot: it
+centres on a coordinate and fetches the forecast by coordinate. So a location
+saved that way is reported as having no coordinates, beside the city name and
+under the alert switch, rather than leaving the map quietly empty.
 
 In a large city, name your neighbourhood rather than the city: São Paulo is some
 50 km across and its centre says nothing useful about the far side. The picker
@@ -270,6 +285,34 @@ question and deserves an answer rather than ten minutes of silence:
 Switching the toggle off and on is therefore the closest thing to "tell me
 again".
 
+### What the switch says
+
+The line under the storm alert switch reports what the watch is actually doing,
+because a quiet plugin and a broken one look the same otherwise:
+
+| | |
+| --- | --- |
+| `off` | the switch is off |
+| `no location set` | nothing is stored to check |
+| `the saved location has no coordinates` | a name is stored, but nothing to centre or forecast on |
+| `starting…` | nothing has come back yet |
+| `checking…` | a request is in flight |
+| `cannot reach the forecast` | one came back and failed — this is not silence, it is an outage |
+| `no forecast for this location` | it answered with nothing usable for these coordinates |
+| `nothing expected` | it answered, and there is no weather to report |
+| `heavy expected around 21:45` | the outlook, and when |
+| `… · not updating` | the reading still stands, but the checks behind it are failing |
+
+A reading already in hand is kept and marked rather than replaced by the error.
+Losing it would trade something true and slightly old for nothing at all, and
+the reading is what you opened the panel to see.
+
+Opening the panel asks again if the last attempt failed, or if the reading is
+older than the quarter hour the forecast is published on — so reconnecting and
+reopening is enough, and there is no need to toggle the switch off and on.
+Inside that window it asks for nothing, since the answer would be the bytes it
+already holds.
+
 ### On screen
 
 ![Notification reading "Severe storm approaching — in about 3h, around 22:45 at Chicago — up to 28 mm/h"](screenshots/alert-severe.webp)
@@ -360,7 +403,7 @@ that needs the shell to exist lives in a `.qml` file and is not.
 | `ui/SettingRow.qml` | one labelled row of the control stack |
 | `lib/TileMath.js` | Web Mercator projection, distance and bearing |
 | `lib/RadarModel.js` | RainViewer endpoints, parsing, echo analysis, sampling |
-| `lib/Alerts.js` | intensity bands, forecast reduction, the notification latch |
+| `lib/Alerts.js` | intensity bands, forecast reduction, the latch, and what the panel says |
 | `lib/Settings.js` | reading and coercing the widget's settings |
 | `lib/Basemap.js` | decodes `data/basemap.bin` and projects it into the viewport |
 | `lib/Frames.js` | which radar frame to show, across a list that keeps being replaced |

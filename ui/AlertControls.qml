@@ -18,7 +18,7 @@ Column {
   property var radar: null
 
   property bool alertsEnabled: false
-  property bool hasLocation: false
+  property string locationState: "unset"
   property int alertLeadMinutes: 120
   property int alertRadiusKm: 100
   property var radiusPresets: []
@@ -33,20 +33,19 @@ Column {
   readonly property color background: bar ? bar.background : Color.background
 
   // Proof the switch is doing something, rather than a silent toggle the user
-  // has to take on faith. Each state is distinguishable: off, unable to run,
-  // working, and a result — so a quiet plugin is never mistaken for a broken
-  // one, or for fair weather.
-  readonly property string alertStatus: {
-    if (!alertsEnabled) return "off"
-    if (!hasLocation) return "no location set"
-    if (!radar) return "starting…"
-    if (radar.checking) return "checking…"
-    if (radar.lastCheckTime <= 0) return "starting…"
-    if (radar.outlookLevel === 0) return "nothing expected"
-
-    var outlook = radar.outlookLabel.toLowerCase() + " expected"
-    return radar.outlookAtClock !== "" ? outlook + " around " + radar.outlookAtClock : outlook
-  }
+  // has to take on faith. The wording lives in Alerts.alertStatus, which is
+  // where it can be tested — it has been wrong twice.
+  readonly property string alertStatus: Alerts.alertStatus({
+    alertsEnabled: alertsEnabled,
+    locationState: locationState,
+    checking: radar ? radar.checking === true : false,
+    everAnswered: radar ? radar.lastAnswerTime > 0 : false,
+    failing: radar ? radar.consecutiveFailures > 0 : false,
+    hasReading: radar ? radar.lastCheckTime > 0 : false,
+    outlookLevel: radar ? radar.outlookLevel : 0,
+    outlookLabel: radar ? radar.outlookLabel : "",
+    outlookAtClock: radar ? radar.outlookAtClock : ""
+  })
 
   SettingRow {
     width: parent.width

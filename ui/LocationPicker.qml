@@ -17,6 +17,7 @@ Column {
   property var bar: null
 
   property string locationName: ""
+  property string locationState: "unset"
   property bool coverageMissing: false
 
   property bool editing: false
@@ -72,10 +73,26 @@ Column {
         opacity: 0.45
       }
 
-      // Sits beside the city rather than over the map: this is a fact about
-      // the configured location, not about whatever the view happens to be
-      // showing, and a message centred on a map that can be panned anywhere
+      // Both sit beside the city rather than over the map: they are facts
+      // about the configured location, not about whatever the view happens to
+      // be showing, and a message centred on a map that can be panned anywhere
       // would claim the latter.
+      //
+      // A name saved with nothing picked behind it is stored, and is a
+      // location for the stock weather widget, which resolves names itself.
+      // Here it is a name and nothing else — no point to centre on, no
+      // coordinate to forecast for — and the map going quiet is otherwise the
+      // only sign of it.
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        visible: root.locationState === "unresolved"
+        text: "· no coordinates — pick one from the list"
+        color: Color.urgent
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        opacity: 0.9
+      }
+
       Text {
         anchors.verticalCenter: parent.verticalCenter
         visible: root.coverageMissing

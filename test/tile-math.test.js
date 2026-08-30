@@ -368,3 +368,36 @@ test("constraining is symmetric between the poles", () => {
     close(south, -north, 1e-9, `z${zoom}`)
   }
 })
+
+test("two positions are the same place despite a round trip through the projection", () => {
+  // Reading what is under the pointer and asking where the map must be centred
+  // for it to stay there returns the centre it was given — off by a few parts
+  // in a quadrillion. Compared exactly, a zoom on the exact centre reads as a
+  // move, which is how a comment came to describe something that never
+  // happened.
+  const width = 700
+  const height = 320
+
+  for (const zoom of [3, 5, 7, 9]) {
+    for (const [latitude, longitude] of [[-26.1478, -53.0272], [51.5074, -0.1278], [0, 0]]) {
+      const under = TileMath.unprojectFromViewport(
+        width / 2, height / 2, latitude, longitude, zoom, width, height)
+      const centre = TileMath.centerForPoint(
+        under.latitude, under.longitude, width / 2, height / 2, zoom + 1, width, height)
+
+      assert.ok(TileMath.samePosition(centre.latitude, centre.longitude, latitude, longitude),
+        `z${zoom} at ${latitude},${longitude} drifted by ` +
+        `${Math.abs(centre.latitude - latitude)}, ${Math.abs(centre.longitude - longitude)}`)
+    }
+  }
+})
+
+test("positions a person could tell apart are not the same place", () => {
+  // The tolerance has to be far below a pixel and far above the drift. A
+  // thousandth of a degree is about a tenth of a pixel at the deepest zoom.
+  assert.strictEqual(TileMath.samePosition(0, 0, 0, 0), true)
+  assert.strictEqual(TileMath.samePosition(-26.1478, -53.0272, -26.1478, -53.0272), true)
+  assert.strictEqual(TileMath.samePosition(0, 0, 0, 0.001), false)
+  assert.strictEqual(TileMath.samePosition(0, 0, 0.001, 0), false)
+  assert.strictEqual(TileMath.samePosition(0, 0, 0, 1e-12), true, "and below it, the same place")
+})

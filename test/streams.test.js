@@ -125,9 +125,11 @@ test("every collecting process can tell a failure from a fork that never ran", (
   // `onExited` sticks for the life of the session.
   for (const process of PROCESSES.filter(p => p.collects)) {
     const block = source[process.file].slice(source[process.file].indexOf(`id: ${process.id}`))
-    assert.match(block.slice(0, 1200), /property bool answered: false/,
-      `${process.id} has no answered flag`)
-    assert.match(block.slice(0, 1200), /onRunningChanged: if \(!running && !answered\)/,
+    const head = block.slice(0, 2000)
+    assert.match(head, /property bool answered: false/, `${process.id} has no answered flag`)
+    // The property, not one particular spelling of it: the handler has to
+    // consult `answered` when `running` drops, however it is written.
+    assert.match(head, /onRunningChanged[\s\S]{0,240}answered/,
       `${process.id} does not answer a fork that never ran`)
   }
 })
