@@ -3,9 +3,10 @@ import qs.Commons
 import qs.Ui
 import "../lib/Alerts.js" as Alerts
 
-// The storm alert controls, in the panel rather than only in the settings
-// form: turning the watch on is one click from the thing you are looking at,
-// the way the audio panel keeps its mute switch beside the thing it mutes.
+// The storm alert controls, in the panel: turning the watch on is one click
+// from the thing you are looking at, the way the audio panel keeps its mute
+// switch beside the thing it mutes. It is also the only place they exist — see
+// Settings.js.
 //
 // Laid out as the network panel lays out its band section — a heading, the
 // switch that governs everything under it on the same line, and the choices
@@ -104,8 +105,6 @@ Column {
     }
   }
 
-  // Only while alerts are on: with them off there is nothing to tune, and the
-  // rings this controls are not drawn either.
   // Only while alerts are on: with them off there is nothing to tune, and the
   // rings these control are not drawn either.
   ChoiceSection {

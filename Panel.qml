@@ -14,9 +14,11 @@ import "lib/RadarModel.js" as RadarModel
 //
 // Opens centred on the location Omarchy already knows about, stacks the latest
 // radar frame over a basemap, and can play the last two hours as a loop. The
-// alert toggle lives down here rather than only in the settings form, so
-// turning the watch on is one click from the thing you are looking at, the way
-// the audio panel keeps its mute switch beside the thing it mutes.
+// alert toggle lives down here, so turning the watch on is one click from the
+// thing you are looking at, the way the audio panel keeps its mute switch
+// beside the thing it mutes — and because a schema entry is not an interface:
+// nothing in the installed shell renders one, so a control that is not in a
+// panel is nowhere. See Settings.js.
 //
 // This file owns the state the pieces in ui/ share — where the map is looking,
 // which frame is on screen, what is being edited — plus the lifecycle, the
@@ -752,9 +754,9 @@ Panel {
             // result instead of up to ten minutes of silence.
             if (next && root.radar && root.radar.checkNow) Qt.callLater(root.radar.checkNow)
           }
-          // The service watches for these and re-checks on its own, so
-          // changing a value from the settings form behaves the same as
-          // changing it here.
+          // The service watches for these and re-checks on its own, so a
+          // value edited into shell.json by hand behaves the same as one
+          // chosen here.
           onRadiusChosen: function(km) { root.persistSetting("alertRadiusKm", km) }
           onThresholdChosen: function(name) { root.persistSetting("alertMinIntensity", name) }
         }

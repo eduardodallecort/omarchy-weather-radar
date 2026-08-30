@@ -31,7 +31,7 @@ test("every setting declares the same default in both halves of the manifest", (
 test("every setting the code reads is a setting the manifest declares", () => {
   const declared = new Set(widget.schema.map(entry => entry.key))
   for (const key of Object.keys(Settings.DEFAULTS)) {
-    assert.ok(declared.has(key), `${key} has no schema entry, so nobody can change it`)
+    assert.ok(declared.has(key), `${key} is read by the code but the manifest does not declare it`)
   }
 })
 
@@ -59,7 +59,7 @@ test("the declared ranges match the ones the code enforces", () => {
   assert.strictEqual(zoom.max, RadarModel.MAX_MAP_ZOOM)
 })
 
-test("every radius preset is a value the settings form can also produce", () => {
+test("every radius preset is a value the declared range allows", () => {
   for (const preset of Settings.RADIUS_PRESETS_KM) {
     assert.ok(preset >= Settings.RADIUS_MIN_KM && preset <= Settings.RADIUS_MAX_KM, `${preset}`)
     assert.strictEqual(preset % Settings.RADIUS_STEP_KM, 0, `${preset} is not on the step`)
