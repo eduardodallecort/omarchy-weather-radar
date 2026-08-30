@@ -222,6 +222,12 @@ alongside gusts of 45 km/h. Rain alone does not make weather severe — rain
 arriving into an unstable airmass does, and CAPE measures the energy available
 to it.
 
+Each slot is judged against the hour it falls in, peaked across the five
+sampled points. Across points because an airmass does not stop at the edge of a
+grid cell; within the hour because the atmosphere at five in the afternoon is
+not the atmosphere now, and pairing the two would report rain falling into
+still air as a storm on the strength of a squall forecast for later.
+
 A severe alert names the figures that put it there, and only those: rain heavy
 enough on its own reads "up to 18 mm/h", while ordinary rain into a loaded
 airmass reads "CAPE 2400 J/kg". Printing every figure regardless would produce

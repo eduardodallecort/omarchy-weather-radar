@@ -99,8 +99,11 @@ test("every request carries a ceiling on bytes as well as on time", () => {
 test("the ceilings leave room above what the endpoints actually return", () => {
   // Measured against the real endpoints: the RainViewer manifest is 766 bytes,
   // a five-result geocoding answer 1,834, and a five-point forecast at the
-  // widest window this plugin asks for 9,269. A ceiling under what the service
-  // really sends is an outage nobody would think to look for.
+  // widest window this plugin asks for 9,269. The window later gained an hour,
+  // so that the last slots have one to be judged against; re-measured at the
+  // widest radius it came back 6,093, and 9,269 stands as the conservative
+  // figure. A ceiling under what the service really sends is an outage nobody
+  // would think to look for.
   assert.ok(RadarModel.MANIFEST_MAX_BYTES >= 766 * 10)
   assert.ok(RadarModel.GEOCODING_MAX_BYTES >= 1834 * 10)
   assert.ok(RadarModel.FORECAST_MAX_BYTES >= 9269 * 10)

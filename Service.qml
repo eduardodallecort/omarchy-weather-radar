@@ -452,8 +452,13 @@ Item {
     }
 
     forecastProc.answered = false
+    // One hour more than the window is wide. Each slot is judged against the
+    // instability of the hour it falls in, and the slots start at the quarter
+    // hour already under way — so a four-hour window ending at 16:00 begins at
+    // 12:15 and touches five hours. Without the extra one the last slots have
+    // no hour to be judged against and are never promoted.
     forecastProc.command = RadarModel.forecastCommand(
-      points, forecastSlots, Math.max(2, Math.ceil(leadMinutes / 60)))
+      points, forecastSlots, Math.max(2, Math.ceil(leadMinutes / 60)) + 1)
     forecastProc.running = true
   }
 

@@ -22,11 +22,36 @@ function forecast(rates, options) {
         return `2026-08-15T${String(hour).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`
       })
     },
-    hourly: {
-      cape: settings.cape === undefined ? [0] : [settings.cape],
-      wind_gusts_10m: settings.gust === undefined ? [0] : [settings.gust]
-    }
+    hourly: hourly(rates.length, settings)
   }
+}
+
+// The hourly series the slots above sit inside. One entry per hour they span,
+// because the promotion rule pairs a slot with its own hour: a fixture that
+// declared a single hour would leave every later slot without one.
+//
+// `cape` and `gust` set every hour; `capeByHour` and `gustByHour` set them one
+// at a time, which is what the tests about *when* the air is unstable need.
+function hourly(slotCount, settings) {
+  const first = 20 + Math.floor((settings.startMinute || 0) / 60)
+  const last = 20 + Math.floor(((settings.startMinute || 0) + (slotCount - 1) * 15) / 60)
+  const time = []
+  const cape = []
+  const gust = []
+  for (let hour = first; hour <= last; hour++) {
+    const index = hour - first
+    time.push(`2026-08-15T${String(hour).padStart(2, "0")}:00`)
+    cape.push(settings.capeByHour ? (settings.capeByHour[index] || 0) : (settings.cape || 0))
+    gust.push(settings.gustByHour ? (settings.gustByHour[index] || 0) : (settings.gust || 0))
+  }
+  return { time: time, cape: cape, wind_gusts_10m: gust }
+}
+
+// summarizePoint is handed the hourly peaks the whole response produced, so
+// tests derive them from the same fixture. Passing numbers alongside the entry
+// is what let a test assert instability the entry did not carry.
+function point(entry, slots) {
+  return Alerts.summarizePoint(entry, Alerts.hourlyPeaks([entry]), slots)
 }
 
 // ------------------------------------------------------------------ levels
@@ -118,21 +143,96 @@ test("instability promotes rain but never invents it", () => {
 
 test("a promoted slot is one that was already raining", () => {
   // Moderate into an unstable airmass becomes heavy...
-  const promoted = Alerts.summarizePoint(forecast([3], { cape: 3000 }), 3000, 0, 4)
+  const promoted = point(forecast([3], { cape: 3000 }), 4)
   assert.strictEqual(promoted.level, Alerts.HEAVY)
 
   // ...but drizzle stays drizzle, however unstable the air is. Instability is
   // a multiplier on rain, not a source of it.
-  const drizzle = Alerts.summarizePoint(forecast([1], { cape: 3000 }), 3000, 0, 4)
+  const drizzle = point(forecast([1], { cape: 3000 }), 4)
   assert.strictEqual(drizzle.level, Alerts.LIGHT)
 
   // And a clear slot in an explosive airmass is still a clear slot.
-  const dry = Alerts.summarizePoint(forecast([0], { cape: 5000 }), 5000, 90, 4)
+  const dry = point(forecast([0], { cape: 5000 }), 4)
   assert.strictEqual(dry.level, Alerts.CLEAR)
 })
 
+// The rule this pins is *when* the air has to be unstable, not whether.
+//
+// Instability was taken as the peak over the whole forecast window, and the
+// window length comes from the alert radius. So a squall forecast for the
+// afternoon promoted rain falling now, and widening the radius from 150 km to
+// 200 km changed "Moderate rain now" into "Heavy rain now" — a setting about
+// how far ahead to look, rewriting what the plugin said about the present.
+test("a slot is promoted by its own hour, not by a later one", () => {
+  // Moderate rain in the first hour; the instability arrives in the second.
+  const later = forecast([3, 0, 0, 0, 0, 0, 0, 0], { capeByHour: [0, 3000] })
+  const summary = point(later, 8)
+
+  assert.strictEqual(summary.level, Alerts.MODERATE,
+    "rain falling into stable air is not a storm because one is forecast later")
+  assert.strictEqual(summary.lead, 0)
+})
+
+test("and is promoted when the instability is in its own hour", () => {
+  // The same instability, with the rain moved into the hour that carries it.
+  const together = forecast([0, 0, 0, 0, 3, 0, 0, 0], { capeByHour: [0, 3000] })
+  const summary = point(together, 8)
+
+  assert.strictEqual(summary.level, Alerts.HEAVY)
+  assert.strictEqual(summary.lead, 60, "the hour it was promoted in is the hour it is reported for")
+})
+
+test("the reported instability is the promoted hour's, not the window's", () => {
+  const entry = forecast([0, 0, 0, 0, 3, 0, 0, 0], { capeByHour: [9000, 3000] })
+  const outlook = Alerts.summarizeForecast([entry], 8)
+
+  assert.strictEqual(outlook.cape, 3000,
+    "the toast describes the hour being warned about")
+})
+
+// The symptom, stated as the invariant it broke: looking further ahead may
+// find worse weather later, but it cannot change the verdict on the slot
+// already under way.
+test("widening the window does not change what is said about the present", () => {
+  const entry = forecast([3, 0, 0, 0, 0, 0, 0, 0], { capeByHour: [0, 3000] })
+
+  const near = Alerts.summarizeForecast([entry], 4)
+  const far = Alerts.summarizeForecast([entry], 8)
+
+  assert.strictEqual(near.level, Alerts.MODERATE)
+  assert.strictEqual(far.level, Alerts.MODERATE)
+  assert.strictEqual(near.leadMinutes, far.leadMinutes)
+})
+
+test("a slot with no hour of its own is judged on its rain alone", () => {
+  // A response whose hourly series stops short. Inventing instability for the
+  // uncovered slots is the one direction of error this cannot afford.
+  const entry = forecast([3, 0, 0, 0, 0, 0, 0, 0], { cape: 3000 })
+  entry.hourly.time = entry.hourly.time.slice(0, 1)
+  entry.hourly.cape = entry.hourly.cape.slice(0, 1)
+  entry.hourly.wind_gusts_10m = entry.hourly.wind_gusts_10m.slice(0, 1)
+
+  const uncovered = forecast([0, 0, 0, 0, 3, 0, 0, 0], { cape: 3000 })
+  uncovered.hourly.time = uncovered.hourly.time.slice(0, 1)
+  uncovered.hourly.cape = uncovered.hourly.cape.slice(0, 1)
+  uncovered.hourly.wind_gusts_10m = uncovered.hourly.wind_gusts_10m.slice(0, 1)
+
+  assert.strictEqual(point(entry, 8).level, Alerts.HEAVY, "the covered hour still promotes")
+  assert.strictEqual(point(uncovered, 8).level, Alerts.MODERATE, "the uncovered one does not")
+})
+
+test("hourlyPeaks takes the highest across points, hour by hour", () => {
+  const calm = forecast([0, 0, 0, 0, 0, 0, 0, 0], { capeByHour: [100, 200] })
+  const rough = forecast([0, 0, 0, 0, 0, 0, 0, 0], { capeByHour: [50, 4000] })
+  const peaks = Alerts.hourlyPeaks([calm, rough])
+
+  assert.strictEqual(peaks["2026-08-15T20"].cape, 100)
+  assert.strictEqual(peaks["2026-08-15T21"].cape, 4000,
+    "a town is not a point, so the worst of the sampled cells wins")
+})
+
 test("promotion cannot push a level past severe", () => {
-  const summary = Alerts.summarizePoint(forecast([30], { cape: 4000 }), 4000, 0, 4)
+  const summary = point(forecast([30], { cape: 4000 }), 4)
   assert.strictEqual(summary.level, Alerts.SEVERE)
 })
 
@@ -156,7 +256,7 @@ test("the forecast window is bounded at both ends", () => {
 // ------------------------------------------------------------------ reduction
 
 test("the worst slot inside the window is the one reported", () => {
-  const summary = Alerts.summarizePoint(forecast([0, 1, 9, 3]), 0, 0, 4)
+  const summary = point(forecast([0, 1, 9, 3]), 4)
   assert.strictEqual(summary.level, Alerts.HEAVY)
   assert.strictEqual(summary.leadMinutes, undefined, "summarizePoint reports `lead`")
   assert.strictEqual(summary.lead, 30, "the third slot is half an hour out")
@@ -165,12 +265,12 @@ test("the worst slot inside the window is the one reported", () => {
 
 test("weather beyond the window is not reported", () => {
   // A downpour in six hours is not an alert; it is a forecast.
-  const summary = Alerts.summarizePoint(forecast([0, 0, 0, 0, 20]), 0, 0, 4)
+  const summary = point(forecast([0, 0, 0, 0, 20]), 4)
   assert.strictEqual(summary.level, Alerts.CLEAR)
 })
 
 test("the first slot reads as now, not as fifteen minutes away", () => {
-  const summary = Alerts.summarizePoint(forecast([9]), 0, 0, 4)
+  const summary = point(forecast([9]), 4)
   assert.strictEqual(summary.lead, 0)
 })
 
@@ -178,14 +278,14 @@ test("a response with no usable series is null, not clear", () => {
   // Null means "keep what you had". Clear means "it is not going to rain", and
   // saying that on the strength of a broken response is the failure mode this
   // plugin most has to avoid.
-  assert.strictEqual(Alerts.summarizePoint(null, 0, 0, 4), null)
-  assert.strictEqual(Alerts.summarizePoint({}, 0, 0, 4), null)
+  assert.strictEqual(point(null, 4), null)
+  assert.strictEqual(point({}, 4), null)
   assert.strictEqual(Alerts.summarizeForecast([], 4), null)
   assert.strictEqual(Alerts.summarizeForecast([null, {}], 4), null)
 })
 
 test("a missing precipitation series is not an empty one", () => {
-  const summary = Alerts.summarizePoint({ minutely_15: { time: [] } }, 0, 0, 4)
+  const summary = point({ minutely_15: { time: [] } }, 4)
   assert.strictEqual(summary.level, Alerts.CLEAR)
   assert.strictEqual(summary.clock, "")
 })
@@ -225,17 +325,10 @@ test("the reported peak is the wettest slot anywhere in the sample", () => {
 
 test("a garbled number in the series is read as no rain, not as NaN", () => {
   const entry = { minutely_15: { precipitation: [null, "abc", undefined, slot(9)], time: [] } }
-  const summary = Alerts.summarizePoint(entry, 0, 0, 4)
+  const summary = point(entry, 4)
   assert.ok(Number.isFinite(summary.peak))
   assert.strictEqual(summary.level, Alerts.HEAVY, "the one real value still counts")
   assert.strictEqual(summary.lead, 45, "and it is placed in its own slot")
-})
-
-test("peakOf survives a series that is not one", () => {
-  assert.strictEqual(Alerts.peakOf(null), 0)
-  assert.strictEqual(Alerts.peakOf([]), 0)
-  assert.strictEqual(Alerts.peakOf([1, "x", null, 5]), 5)
-  assert.strictEqual(Alerts.peakOf([-3, -1]), 0, "a negative reading is not a peak")
 })
 
 // ------------------------------------------------------------------ the latch
