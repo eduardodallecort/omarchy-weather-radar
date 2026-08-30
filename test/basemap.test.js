@@ -283,6 +283,24 @@ test("a run of points outside the same edge collapses to one", () => {
   assert.ok(Math.max(...xs) > 700, "the path still leaves the canvas")
 })
 
+test("a point on screen between two off it is not collapsed away", () => {
+  // The reduction folds three points that are outside the same edge into two.
+  // Judging it on the anchor and the newcomer alone is not enough: a ring that
+  // leaves the viewport, comes back and leaves the same side again has those
+  // two outside while the point between them — the only part anybody can see —
+  // is in the middle of the map. Dropping it took the whole excursion, and a
+  // feature made of nothing else was not drawn at all.
+  const ring = [[-3000, 0], [0, 0], [-3000, 0], [-4000, 0], [-5000, 0]]
+  const layer = Basemap.decode(encode([
+    { name: "river", kind: 0, minZoom: 3, maxZoom: 9, features: [[ring]] }
+  ])).layers.river
+
+  const path = Basemap.featurePaths(layer, 0, view(9, 0, 0), 0.7)[0]
+  const xs = path.filter((_, i) => i % 2 === 0)
+  assert.ok(xs.some(x => x > 0 && x < 700),
+    `the vertex inside the viewport survives, got ${JSON.stringify(xs)}`)
+})
+
 test("asking for a feature that is not there is empty, not an error", () => {
   const land = Basemap.decode(encode(SIMPLE)).layers.land
   assert.deepStrictEqual(Basemap.featurePaths(land, -1, view(9, 0, 0)), [])
