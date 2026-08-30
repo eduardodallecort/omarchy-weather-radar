@@ -139,8 +139,14 @@ ShellRoot {
     command: ["omarchy-weather-location", "--set", "Reykjavik", "64.1466,-21.9426"]
   }
 
+  // Short enough that every step below happens before the service's own
+  // location retry does. That retry runs every five seconds while there is no
+  // location, and it reads the same file this writes — so a probe that took
+  // longer would find the location loaded and could not tell which mechanism
+  // loaded it. Both the assertion that the watch is blind and the assertion
+  // that reloadLocation() is what fixes it depend on getting there first.
   Timer {
-    interval: 1200
+    interval: 600
     repeat: true
     running: true
     onTriggered: {
@@ -164,7 +170,10 @@ ShellRoot {
       } else if (n === 5) {
         harness.report("afterReload.state", s.locationState)
         harness.report("afterReload.name", s.locationName)
-      } else if (n === 7) {
+      } else if (n === 10) {
+        // Deliberately late. The location is loaded by now, so the retry has
+        // stood down and nothing here is racing it; what this waits on is the
+        // forecast round trip through the fake curl.
         harness.report("check.reading", s.lastCheckTime > 0 ? "yes" : "no")
         harness.report("check.outlook", s.outlookLabel)
         // A flag cleared only from onExited is how this plugin froze twice.
