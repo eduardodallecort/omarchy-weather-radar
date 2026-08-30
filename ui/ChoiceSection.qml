@@ -39,6 +39,7 @@ Column {
 
   // The trade-off, where the control is, rather than in the README.
   Text {
+    textFormat: Text.PlainText
     width: parent.width
     visible: root.caption !== ""
     text: root.caption

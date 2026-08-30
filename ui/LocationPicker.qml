@@ -55,6 +55,7 @@ Column {
       spacing: Style.space(8)
 
       Text {
+        textFormat: Text.PlainText
         anchors.verticalCenter: parent.verticalCenter
         text: root.locationName !== "" ? root.locationName : "Set a location"
         color: root.foreground
@@ -64,6 +65,7 @@ Column {
       }
 
       Text {
+        textFormat: Text.PlainText
         anchors.verticalCenter: parent.verticalCenter
         text: Glyphs.PENCIL
         color: root.foreground
@@ -83,6 +85,7 @@ Column {
       // coordinate to forecast for — and the map going quiet is otherwise the
       // only sign of it.
       Text {
+        textFormat: Text.PlainText
         anchors.verticalCenter: parent.verticalCenter
         visible: root.locationState === "unresolved"
         text: "· no coordinates — pick one from the list"
@@ -93,6 +96,7 @@ Column {
       }
 
       Text {
+        textFormat: Text.PlainText
         anchors.verticalCenter: parent.verticalCenter
         visible: root.coverageMissing
         text: "· no radar coverage"
@@ -157,6 +161,7 @@ Column {
           : "transparent"
 
         Text {
+          textFormat: Text.PlainText
           anchors.centerIn: parent
           text: root.saving ? Glyphs.PROGRESS_CLOCK : "✕"
           font.family: Style.font.family
@@ -211,6 +216,7 @@ Column {
           spacing: Style.space(8)
 
           Text {
+            textFormat: Text.PlainText
             text: modelData.name
             color: highlighted ? Style.hoverStateColor(root.foreground, Color.accent) : root.foreground
             font.family: Style.font.family
@@ -218,6 +224,7 @@ Column {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: text !== ""
             text: modelData.description
             color: Qt.darker(root.foreground, 1.5)

@@ -256,6 +256,7 @@ Item {
     }
 
     Text {
+      textFormat: Text.PlainText
       anchors.right: parent.right
       anchors.bottom: parent.bottom
       anchors.margins: Style.space(6)
@@ -267,6 +268,7 @@ Item {
     }
 
     Text {
+      textFormat: Text.PlainText
       anchors.centerIn: parent
       visible: root.loading
       text: root.radarUnavailable ? "Radar unavailable" : "Loading radar…"

@@ -79,6 +79,7 @@ Column {
       // other caption in the panel — it belongs to it rather than to the rows
       // below.
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         text: root.alertStatus
         color: root.foreground

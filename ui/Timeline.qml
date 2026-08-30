@@ -65,6 +65,7 @@ Item {
   // clock that only ever renders five characters cannot do that, and the
   // timestamp already says whether you are looking at the past.
   Text {
+    textFormat: Text.PlainText
     id: frameTime
     anchors.right: parent.right
     anchors.rightMargin: Style.space(10)

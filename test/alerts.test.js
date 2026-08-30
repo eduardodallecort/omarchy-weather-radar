@@ -347,6 +347,34 @@ test("only a severe alert carries figures at all", () => {
   }
 })
 
+// The place name is the one string in the notification this plugin did not
+// write, and the body is rendered by a component it does not own. See
+// test/text-format.sh, which measures that Text.StyledText — the mode
+// Omarchy's NotificationCard uses — fetches the source of an img tag.
+test("a place name cannot carry markup into the notification body", () => {
+  const hostile = 'Springfield<img src="http://127.0.0.1:1/beacon.png">'
+  const text = Alerts.notificationText(
+    { level: Alerts.MODERATE, leadMinutes: 30, clock: "10:15", precipitation: slot(3), cape: 0, gust: 0 },
+    hostile)
+
+  assert.ok(!text.description.includes("<"), text.description)
+  assert.ok(!text.description.includes("&"), text.description)
+
+  // The name still reads as the place. Stripping is not redaction: somebody
+  // woken at three in the morning has to recognise where the weather is.
+  assert.ok(text.description.includes("Springfield"), text.description)
+})
+
+test("inertText removes only what opens markup", () => {
+  assert.strictEqual(Alerts.inertText("<b>"), "b>")
+  assert.strictEqual(Alerts.inertText("&amp;"), "amp;")
+  assert.strictEqual(Alerts.inertText("São Paulo"), "São Paulo",
+    "an ordinary name passes through whole")
+  assert.strictEqual(Alerts.inertText("Stratford-upon-Avon"), "Stratford-upon-Avon")
+  assert.strictEqual(Alerts.inertText(null), "")
+  assert.strictEqual(Alerts.inertText(undefined), "")
+})
+
 test("the location is named when there is one and skipped when there is not", () => {
   const named = Alerts.notificationText(
     { level: Alerts.MODERATE, leadMinutes: 30, clock: "", precipitation: slot(3), cape: 0, gust: 0 },
