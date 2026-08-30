@@ -104,9 +104,6 @@ Radar shows **precipitation**, not cloud. A completely overcast sky with no rain
 falling reads as an empty map — that is correct, not a fault. Warmer colours
 mean heavier precipitation, and the most intense cores usually indicate hail.
 
-Eight palettes are available in the widget settings. NEXRAD Level III is the one
-most broadcast meteorologists use.
-
 ### The base map
 
 The coastlines, borders, lakes, rivers, city footprints and place names are
@@ -186,8 +183,7 @@ beside each suggestion separates them from their namesakes elsewhere.
 
 ## Alerts
 
-Alerts are **off by default**. Turn them on from the toggle in the panel, or in
-the widget settings.
+Alerts are **off by default**. Turn them on from the toggle in the panel.
 
 While on, the plugin checks the forecast every ten minutes — the forecast model
 does not update any faster, so checking more often would re-fetch bytes that
@@ -197,7 +193,7 @@ background requests at all, and fetches only while the map is open.
 Two settings shape what reaches you, and they answer different questions. The
 **radius** decides how far ahead to look; the **threshold** decides how bad it
 has to be to be worth interrupting you. Both are in the panel once alerts are
-on, and in the widget settings either way.
+on.
 
 ### The threshold: how bad is worth saying
 
@@ -250,9 +246,10 @@ inspected, converted at an assumed 50 km/h. Lead time is not free: a four-hour
 forecast is meaningfully less certain than a one-hour one, so a wider radius
 buys warning at the cost of crying wolf more often.
 
-The panel offers those four. The widget settings take any value from 25 to
-250 km in steps of 25, and one set there appears in the panel alongside the
-presets.
+The panel offers those four. Any other multiple of 25 between 25 and 250 km
+works too, set as `alertRadiusKm` on the widget's entry in
+`~/.config/omarchy/shell.json`; a value put there appears in the panel alongside
+the presets.
 
 ### Where it looks
 
