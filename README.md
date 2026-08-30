@@ -203,15 +203,22 @@ on, and in the widget settings either way.
 
 | Threshold | Rain rate | In practice |
 | --- | --- | --- |
-| Light | 0.5 mm/h | drizzle |
+| Light | 0.3 mm/h | any rain the forecast reports |
 | Moderate | 2.5 mm/h | steady rain |
 | Heavy | 7.6 mm/h | downpours and convective cores — the default |
 | Severe | 15 mm/h | a deluge, or promoted from Heavy by the rule below |
 
-Rates follow the standard intensity scale, checked against 2144 forecast samples
-over the Sahel, the Amazon, the United States, Indonesia and India. Heavy lands
-near the 99th percentile of wet slots in that survey: rare enough to mean
-something, common enough to fire.
+Moderate, Heavy and Severe follow the standard intensity scale, checked against
+2144 forecast samples over the Sahel, the Amazon, the United States, Indonesia
+and India. Heavy lands near the 99th percentile of wet slots in that survey:
+rare enough to mean something, common enough to fire.
+
+Light sits below the scale's drizzle boundary of 0.5 mm/h on purpose. The
+forecast reports rain rounded to a tenth of a millimetre per quarter hour, so
+0.4 mm/h is the smallest amount it can express and nothing lands between that
+and nothing at all — in a sample of 1728 slots, 59% of the wet ones were exactly
+that one step. A band at 0.5 mm/h could not be reached from below, so Light
+means "the forecast reports rain".
 
 The promotion rule is the one that matters for storms. A slot already at
 moderate or above is raised one band when CAPE reaches 2000 J/kg, or 1000 J/kg

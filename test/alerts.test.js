@@ -59,8 +59,8 @@ test("every threshold the user can pick is a level the bands can produce", () =>
 
 test("the precipitation bands sit exactly on the published scale", () => {
   assert.strictEqual(Alerts.levelForPrecipitation(slot(0)), Alerts.CLEAR)
-  assert.strictEqual(Alerts.levelForPrecipitation(slot(0.49)), Alerts.CLEAR)
-  assert.strictEqual(Alerts.levelForPrecipitation(slot(0.5)), Alerts.LIGHT)
+  assert.strictEqual(Alerts.levelForPrecipitation(slot(0.29)), Alerts.CLEAR)
+  assert.strictEqual(Alerts.levelForPrecipitation(slot(0.3)), Alerts.LIGHT)
   assert.strictEqual(Alerts.levelForPrecipitation(slot(2.49)), Alerts.LIGHT)
   assert.strictEqual(Alerts.levelForPrecipitation(slot(2.5)), Alerts.MODERATE)
   assert.strictEqual(Alerts.levelForPrecipitation(slot(7.59)), Alerts.MODERATE)
@@ -68,6 +68,26 @@ test("the precipitation bands sit exactly on the published scale", () => {
   assert.strictEqual(Alerts.levelForPrecipitation(slot(14.9)), Alerts.HEAVY)
   assert.strictEqual(Alerts.levelForPrecipitation(slot(15)), Alerts.SEVERE)
   assert.strictEqual(Alerts.levelForPrecipitation(slot(100)), Alerts.SEVERE)
+})
+
+// The band that has to be checked against the source rather than against the
+// scale. Open-Meteo rounds precipitation to a tenth of a millimetre per slot,
+// so 0.1 mm is not a small reading — it is the smallest reading that exists,
+// and in a sample of 1728 slots it was 59% of every wet one. A lowest band
+// above it reports the commonest rain there is as no rain, which is the one
+// failure this plugin cannot afford: silence that looks like fair weather.
+test("the smallest amount of rain the source can express is not called clear", () => {
+  const step = 0.1
+  assert.strictEqual(Alerts.levelForPrecipitation(step), Alerts.LIGHT,
+    "one reporting step of precipitation must reach the lowest band")
+
+  // And it is the step, not a value chosen here, that the band has to clear.
+  assert.ok(Alerts.RATE_LIGHT < Alerts.ratePerHour(step),
+    "the lowest band must sit below one reporting step, not on it")
+
+  // Nothing lands between nothing and one step, so the comparison is never
+  // made against a value the source can actually produce.
+  assert.strictEqual(Alerts.levelForPrecipitation(0), Alerts.CLEAR)
 })
 
 test("the bands stay inside the range the forecast source actually produces", () => {
@@ -285,13 +305,13 @@ test("a timestamp yields the local clock and nothing else", () => {
 test("weather already under way is not described as approaching", () => {
   const now = Alerts.notificationText(
     { level: Alerts.HEAVY, leadMinutes: 0, clock: "20:15", precipitation: slot(9), cape: 0, gust: 0 },
-    "Marmeleiro")
+    "Detroit")
   assert.strictEqual(now.headline, "Heavy rain now")
   assert.ok(now.description.startsWith("under way since 20:15"), now.description)
 
   const soon = Alerts.notificationText(
     { level: Alerts.HEAVY, leadMinutes: 90, clock: "21:45", precipitation: slot(9), cape: 0, gust: 0 },
-    "Marmeleiro")
+    "Detroit")
   assert.strictEqual(soon.headline, "Heavy rain approaching")
   assert.ok(soon.description.startsWith("in about 1h30, around 21:45"), soon.description)
 })
@@ -330,8 +350,8 @@ test("only a severe alert carries figures at all", () => {
 test("the location is named when there is one and skipped when there is not", () => {
   const named = Alerts.notificationText(
     { level: Alerts.MODERATE, leadMinutes: 30, clock: "", precipitation: slot(3), cape: 0, gust: 0 },
-    "Marmeleiro")
-  assert.ok(named.description.endsWith("at Marmeleiro"), named.description)
+    "Detroit")
+  assert.ok(named.description.endsWith("at Detroit"), named.description)
 
   const anonymous = Alerts.notificationText(
     { level: Alerts.MODERATE, leadMinutes: 30, clock: "", precipitation: slot(3), cape: 0, gust: 0 }, "")
