@@ -276,6 +276,13 @@ Panel {
     root.locationSuggestions = (exitCode === 0 && root.editingLocation)
       ? RadarModel.parseGeocodingResults(text) : []
     root.suggestionIndex = 0
+
+    // Only when there is still a search to run. cancelEditingLocation() clears
+    // the pending query, and a successful save routes through it too — so a
+    // request in flight when the user presses Escape would come back, find
+    // pending and active different, and go out again for the empty string:
+    // a real call to the geocoder for nothing, after the field is closed.
+    if (!root.editingLocation || root.geocodePendingQuery === "") return
     if (root.geocodePendingQuery !== root.geocodeActiveQuery) Qt.callLater(root.startGeocode)
   }
 
