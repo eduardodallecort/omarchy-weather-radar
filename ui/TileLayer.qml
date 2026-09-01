@@ -1,12 +1,12 @@
 import QtQuick
-import "TileMath.js" as TileMath
+import "../lib/TileMath.js" as TileMath
 
 // One raster layer of an XYZ tile map.
 //
-// The panel stacks these — a basemap and the radar frames on top — which is why
-// the geometry lives here instead of in the panel: every layer shares a centre
-// and zoom, and any drift between them would show up as the rain sitting next
-// to the coastline instead of on it.
+// RadarMap stacks two of these, one per radar frame, over the ground that
+// BasemapLayer draws. The geometry lives here rather than up there because
+// every layer has to share a centre and zoom: any drift between them would
+// show up as the rain sitting next to the coastline instead of on it.
 //
 // Tiles are plain Image elements. Qt's pixmap cache keys on URL, and RainViewer
 // tile URLs are immutable per frame, so scrubbing back through the loop or
@@ -90,13 +90,20 @@ Item {
       source: root.tileUrlFor ? root.tileUrlFor(root.sourceZoom, modelData.tileX, modelData.tileY) : ""
       asynchronous: true
       cache: true
+      // The loader is asked for a tile-sized surface rather than whatever the
+      // response turns out to declare. Every other stream that reaches this
+      // process carries a ceiling; an image arriving over the network is one
+      // too, and its size is decided by whoever served it.
+      sourceSize: Qt.size(root.tileSize, root.tileSize)
       // Upscaled tiles need the smoothing; native-resolution ones look
       // sharper without it.
       smooth: root.smooth || root.sourceScale > 1
       fillMode: Image.Stretch
 
-      // A missing tile is normal at the edges of coverage and must not look
-      // like a rendering fault, so it simply stays invisible.
+      // A tile that has not arrived stays invisible rather than showing a
+      // placeholder, which would read as a rendering fault. Nothing is drawn
+      // for a tile with no data either, but that arrives as a transparent
+      // image rather than as an error.
       visible: status === Image.Ready
       onStatusChanged: if (status === Image.Error) root.tileFailed()
     }

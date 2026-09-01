@@ -1,7 +1,11 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
-import "RadarModel.js" as RadarModel
+import "lib/Glyphs.js" as Glyphs
+import "lib/Alerts.js" as Alerts
+import "lib/Basemap.js" as Basemap
+import "lib/RadarModel.js" as RadarModel
+import "lib/Settings.js" as Settings
 
 // Headless singleton behind the radar plugin.
 //
@@ -35,33 +39,24 @@ Item {
   property var shell: null
   property var settings: ({})
 
-  function setting(name, fallback) {
-    var value = settings ? settings[name] : undefined
-    return value === undefined || value === null ? fallback : value
-  }
-
   // ---------------------------------------------------------------------------
   // Configuration
   // ---------------------------------------------------------------------------
 
-  // A widget is created before its settings are injected, so `settings` is an
-  // empty object for the first moments of a session. That state is "not known
-  // yet", not "alerts are off", and the two must not be confused: treating it
-  // as off makes the arrival of real settings look like the user switching
-  // alerts on, which re-arms the alert latch and can announce the same weather
-  // twice.
-  readonly property bool settingsReady: settings && Object.keys(settings).length > 0
-  readonly property bool alertsEnabled: settingsReady && setting("alertsEnabled", false) === true
-  readonly property int alertRadiusKm: Math.max(25, Math.min(250, Number(setting("alertRadiusKm", 100)) || 100))
-  readonly property string alertThreshold: String(setting("alertMinIntensity", "Heavy"))
+  // Coercion lives in Settings.js, which the panel reads through as well.
+  // Clamping the same value in two places is two chances to disagree about it,
+  // and the pair that would disagree here decides what gets a notification.
+  readonly property bool settingsReady: Settings.isReady(settings)
+  readonly property bool alertsEnabled: Settings.alertsEnabled(settings)
+  readonly property int alertRadiusKm: Settings.alertRadiusKm(settings)
+  readonly property string alertThreshold: Settings.alertThreshold(settings)
 
-  // Storms in most of the world travel somewhere around 50 km/h, so the alert
-  // radius doubles as a lead time: 100 km is roughly two hours of warning.
-  // Expressing it this way means one setting controls both the ring drawn on
-  // the map and how far ahead the forecast is inspected.
-  readonly property real assumedStormSpeedKmh: 50
-  readonly property int leadMinutes: Math.round(alertRadiusKm / assumedStormSpeedKmh * 60)
-  readonly property int forecastSlots: Math.max(4, Math.min(24, Math.ceil(leadMinutes / 15)))
+  // The alert radius doubles as a lead time — the conversion assumes a storm
+  // speed, and lives in Alerts.js with the bands it feeds. One setting
+  // therefore controls both the ring drawn on the map and how far ahead the
+  // forecast is inspected.
+  readonly property int leadMinutes: Alerts.leadMinutesFor(alertRadiusKm)
+  readonly property int forecastSlots: Alerts.forecastSlotsFor(leadMinutes)
 
   // ---------------------------------------------------------------------------
   // Location
@@ -69,6 +64,15 @@ Item {
 
   // Shared with the stock weather widget, which owns the file. Watching it
   // means changing city through the Omarchy menu re-centres the radar live.
+  //
+  // Read whole, without a ceiling, which is the one place this plugin does
+  // that. It is deliberate: this is Omarchy's own state file, read exactly as
+  // Omarchy's own weather panel reads it, with the same FileView and the same
+  // watch. Reading it through a bounded process instead would mean diverging
+  // from the platform on the platform's own file, and losing live updates with
+  // it — omarchy-weather-location writes the file and notifies nobody, so the
+  // watch is the only mechanism there is. Every stream this plugin owns is
+  // bounded; see test/streams.test.js for the inventory.
   //
   // The watch only reaches as far as the containing directory. On a machine
   // where no weather location was ever set, `~/.local/state/omarchy/settings/`
@@ -78,6 +82,11 @@ Item {
 
   readonly property bool hasLocation: location && location.valid === true
   readonly property string locationName: location ? location.name : ""
+
+  // "ready", "unresolved" or "unset" — see RadarModel.locationState. The middle
+  // one is a name typed with no city picked behind it, which the shared file
+  // stores happily and this plugin can do nothing with.
+  readonly property string locationState: RadarModel.locationState(location)
 
   FileView {
     id: locationFile
@@ -155,8 +164,7 @@ Item {
       // carries across the move, and someone who changes city during weather
       // is told nothing because they were already told about somewhere else.
       notifiedLevel = 0
-      outlookLevel = 0
-      outlookAtClock = ""
+      discardReading()
     }
 
     if (hasLocation && alertsEnabled) checkNow()
@@ -199,6 +207,7 @@ Item {
   // monitors showing the panel do not fight over whether fetching should stop.
   function acquireManifest() {
     frameConsumers++
+    loadBasemap()
     refreshManifest()
   }
 
@@ -230,26 +239,94 @@ Item {
     if (radarManifest && lastManifestFetchMs > 0 && now - lastManifestFetchMs < minFetchGapMs) return
 
     lastManifestFetchMs = now
-    manifestProc.command = ["curl", "-fsS", "--max-time", "10", RadarModel.MANIFEST_URL]
+    manifestProc.answered = false
+    manifestProc.command = RadarModel.manifestCommand()
     manifestProc.running = true
   }
 
   Process {
     id: manifestProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        var parsed = RadarModel.parseManifest(text)
-        if (!parsed) {
-          // Keep the previous manifest: stale frames still render, and the
-          // next tick retries. Blanking the map on one failed request would
-          // be a worse outcome than showing data a few minutes old.
-          root.frameFailures++
-          return
-        }
-        root.frameFailures = 0
-        root.radarManifest = parsed
-      }
+
+    // A process that cannot be started emits neither `started` nor `exited`,
+    // and goes from running to not running in silence. `exited` fires before
+    // `running` drops, so a drop with nothing recorded is a fork that never
+    // happened — which has to be answered, or the map waits on a reply that
+    // will never come.
+    property bool answered: false
+
+    onExited: function(exitCode) {
+      answered = true
+      root.applyManifestResponse(exitCode, manifestOut.text)
+    }
+    onRunningChanged: if (!running && !answered) root.applyManifestResponse(-1, "")
+
+    // The collector holds the output and decides nothing. `onStreamFinished`
+    // fires before `onExited`, so deciding there is deciding before the exit
+    // code exists — and a transfer cut short by the time or size ceiling would
+    // be read as one that completed.
+    stdout: StdioCollector { id: manifestOut; waitForEnd: true }
+  }
+
+  function applyManifestResponse(exitCode, text) {
+    // Keep the previous manifest on any failure: stale frames still render,
+    // and the next tick retries. Blanking the map on one failed request would
+    // be a worse outcome than showing data a few minutes old.
+    if (exitCode !== 0) {
+      frameFailures++
+      return
+    }
+    var parsed = RadarModel.parseManifest(text)
+    if (!parsed) {
+      frameFailures++
+      return
+    }
+    frameFailures = 0
+    radarManifest = parsed
+  }
+
+  // ---------------------------------------------------------------------------
+  // Basemap
+  // ---------------------------------------------------------------------------
+
+  // The ground the radar is drawn on, decoded once for the whole session.
+  //
+  // It lives here rather than in the panel for the same reason the frame
+  // manifest does: a bar widget is built once per monitor, and two screens
+  // showing the map would otherwise each hold their own ten megabytes of
+  // coastline. It is read on first use rather than at startup, so a session
+  // that never opens the map never pays for it.
+  //
+  // Data ships with the plugin instead of arriving as tiles. The world's
+  // coastlines do not change, and a keyless tile endpoint is a policy rather
+  // than a property — the one this plugin used began stamping "API KEY
+  // REQUIRED" across every tile in August 2026, for every installation at
+  // once, with nothing failing anywhere. Geometry in the repository cannot be
+  // withdrawn, and works with no network at all.
+  // Also read whole. It is this plugin's own file, inside its own directory:
+  // anything able to replace it can replace Service.qml beside it, so a
+  // ceiling here would guard nothing. Corruption is handled instead — decode()
+  // answers null on anything it cannot read, including a truncated file.
+  property var basemap: null
+  property bool basemapFailed: false
+
+  function loadBasemap() {
+    if (basemap || basemapFile.path !== "") return
+    basemapFile.path = Qt.resolvedUrl("data/basemap.bin").toString().replace("file://", "")
+  }
+
+  FileView {
+    id: basemapFile
+    path: ""
+    onLoaded: {
+      root.basemap = Basemap.decode(basemapFile.data())
+      // decode() answers null on anything it cannot read rather than throwing,
+      // so a corrupt or truncated file costs the ground layer and nothing else.
+      root.basemapFailed = root.basemap === null
+      if (root.basemapFailed) console.warn("weather-radar: data/basemap.bin could not be decoded")
+    }
+    onLoadFailed: {
+      root.basemapFailed = true
+      console.warn("weather-radar: data/basemap.bin could not be read")
     }
   }
 
@@ -274,7 +351,14 @@ Item {
   // ---------------------------------------------------------------------------
 
   property var forecast: null
+
+  // When a check last produced an outlook, and when one last came back at all.
+  // They are different questions: a request that fails, or answers with nothing
+  // usable in it, still happened. Without the second, "has not run yet" and
+  // "ran and could not tell you anything" look identical from outside — and the
+  // failure backoff means the second can last an hour.
   property double lastCheckTime: 0
+  property double lastAnswerTime: 0
   property bool checking: false
   property int consecutiveFailures: 0
 
@@ -293,62 +377,63 @@ Item {
   property real outlookCape: 0
   property real outlookGust: 0
 
-  readonly property string outlookLabel: levelName(outlookLevel)
+  readonly property string outlookLabel: Alerts.levelName(outlookLevel)
 
-  function levelName(level) {
-    if (level >= 4) return "Severe"
-    if (level >= 3) return "Heavy"
-    if (level >= 2) return "Moderate"
-    if (level >= 1) return "Light"
-    return "Clear"
+  // Everything the last check said, dropped together.
+  //
+  // A reading is about a place and a moment, and `lastCheckTime` is what the
+  // panel reads as "there is a reading". Clearing the outlook while leaving the
+  // timestamp behind leaves fair weather asserted for a city that has never
+  // been checked — which is the exact failure the wording elsewhere exists to
+  // prevent, arrived at from the other direction.
+  function discardReading() {
+    outlookLevel = 0
+    outlookLeadMinutes = 0
+    outlookAtClock = ""
+    outlookPrecipitation = 0
+    outlookCape = 0
+    outlookGust = 0
+    lastCheckTime = 0
   }
 
-  function levelValue(name) {
-    var normalized = String(name || "").toLowerCase()
-    if (normalized === "severe") return 4
-    if (normalized === "heavy") return 3
-    if (normalized === "moderate") return 2
-    if (normalized === "light") return 1
-    return 0
+  // Retried from the panel when it opens. See Alerts.shouldRetryForecast for
+  // why only a failing check is retried.
+  //
+  // Seconds rather than the minute the manifest uses. The person this exists
+  // for has just reconnected and reopened the panel, which is a thing that
+  // happens well inside a minute — a floor long enough to catch them would
+  // refuse the one retry that was actually asked for. Overlapping requests are
+  // already impossible, so all this bounds is a burst from opening and closing
+  // repeatedly, and only while checks are failing, which is usually while there
+  // is no network for them to leave on.
+  readonly property int minRetryGapMs: 10000
+
+  function refreshIfStale() {
+    if (!alertsEnabled || !hasLocation || checking) return
+    if (!Alerts.shouldRetryForecast({
+      now: Date.now(),
+      lastAnswer: lastAnswerTime,
+      lastReading: lastCheckTime,
+      failing: consecutiveFailures > 0,
+      floor: minRetryGapMs,
+      cadence: RadarModel.FORECAST_INTERVAL_SEC * 1000
+    })) return
+    checkNow()
   }
 
-  // Bands are rain rate in mm/h, not millimetres per slot. Two reasons: mm/h is
-  // the unit the published intensity scale uses, so "heavy" here means what it
-  // means elsewhere; and a per-slot figure silently depends on the slot length.
+  // What the request in flight was asked about: where, under what name, and
+  // over how wide a window. A response is only an answer to the question that
+  // was asked, and both halves of the question can move while curl is running.
   //
-  // The thresholds follow the standard scale — light under 2.5 mm/h, moderate
-  // to 7.6, heavy above that — and were checked against the data rather than
-  // assumed. Across 2144 forecast samples over the Sahel, the Amazon, the
-  // United States, Indonesia and India, wet slots ran to a maximum of 9.6 mm/h
-  // with the 99th percentile at 7.6, so Heavy sits where genuinely heavy rain
-  // sits and Severe is reserved for a deluge or for the promotion below.
-  //
-  // Those figures are worth keeping in view when adjusting these: bands set
-  // above the range the source actually produces yield an alert that never
-  // fires, which is indistinguishable from fair weather and therefore the one
-  // failure this plugin cannot afford.
-  function levelForPrecipitation(mmPerSlot) {
-    var mmPerHour = mmPerSlot * 4
-    if (mmPerHour >= 15.0) return 4
-    if (mmPerHour >= 7.6) return 3
-    if (mmPerHour >= 2.5) return 2
-    if (mmPerHour >= 0.5) return 1
-    return 0
-  }
+  // Nothing else closes that gap. checkNow() refuses to start a second request
+  // while one is out, so the handlers that react to a change — onLocationChanged
+  // and syncAlertConfig — call it and are turned away, and the change is left
+  // with nothing running for it. Comparing here is what notices, and what asks
+  // again.
+  property string requestedFor: ""
 
-  // CAPE measures the energy available for convection; gusts measure what the
-  // atmosphere is already doing with it. Rain alone does not make weather
-  // severe — rain arriving into an unstable airmass does — so this promotes an
-  // already-rainy slot one band rather than firing on its own.
-  //
-  // Calibrated against forecasts for 268 points across the world's convective
-  // regions, where gusts reach the 99th percentile at 55 km/h and top out at
-  // 63. A rule requiring high gusts *alongside* instability therefore asks for
-  // a value the model barely produces and matches almost nothing, so strong
-  // instability qualifies on its own at 2000 J/kg, with a second arm for
-  // windier setups that are less unstable.
-  function severeConditions(cape, gust) {
-    return cape >= 2000 || (cape >= 1000 && gust >= 45)
+  function forecastRequestKey(lat, lon) {
+    return lat + "," + lon + "|" + locationName + "|" + forecastSlots
   }
 
   function checkNow() {
@@ -368,6 +453,7 @@ Item {
     if (!isFinite(lat) || !isFinite(lon)) return
 
     checking = true
+    requestedFor = forecastRequestKey(lat, lon)
 
     // Five coordinates rather than one: the centre and four points 5 km out.
     // See RadarModel.samplePoints — the model grid is coarse enough that a
@@ -381,132 +467,110 @@ Item {
       return
     }
 
-    var lats = []
-    var lons = []
-    for (var i = 0; i < points.length; i++) {
-      lats.push(points[i].latitude.toFixed(4))
-      lons.push(points[i].longitude.toFixed(4))
-    }
-
-    var url = "https://api.open-meteo.com/v1/forecast"
-      + "?latitude=" + lats.join(",")
-      + "&longitude=" + lons.join(",")
-      + "&minutely_15=precipitation,precipitation_probability"
-      + "&hourly=cape,wind_gusts_10m"
-      + "&forecast_minutely_15=" + forecastSlots
-      + "&forecast_hours=" + Math.max(2, Math.ceil(leadMinutes / 60))
-      + "&timezone=auto"
-    forecastProc.command = ["curl", "-fsS", "--max-time", "12", url]
+    forecastProc.answered = false
+    // One hour more than the window is wide. Each slot is judged against the
+    // instability of the hour it falls in, and the slots start at the quarter
+    // hour already under way — so a four-hour window ending at 16:00 begins at
+    // 12:15 and touches five hours. Without the extra one the last slots have
+    // no hour to be judged against and are never promoted.
+    forecastProc.command = RadarModel.forecastCommand(
+      points, forecastSlots, Math.max(2, Math.ceil(leadMinutes / 60)) + 1)
     forecastProc.running = true
   }
 
   Process {
     id: forecastProc
+
+    // See manifestProc. `checking` is cleared only from here, so a fork that
+    // never happened would leave it set and every later check would return at
+    // the door — the alert silently stopping for the rest of the session.
+    property bool answered: false
+
+    // Set when this service stops the process itself. The exit code that
+    // follows is a cancellation, and counting it would inflate the failure
+    // backoff and tell the user the forecast cannot be reached because they
+    // turned the alerts off.
+    property bool cancelled: false
+
     onExited: function(exitCode) {
-      root.checking = false
-      if (exitCode !== 0) root.consecutiveFailures++
-    }
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        var raw = String(text || "").trim()
-        if (raw === "") return
-        var data
-        try {
-          data = JSON.parse(raw)
-        } catch (e) {
-          root.consecutiveFailures++
-          return
-        }
-        root.consecutiveFailures = 0
-        root.applyForecast(data)
+      answered = true
+      if (cancelled) {
+        cancelled = false
+        root.checking = false
+        return
       }
+      root.applyForecastResponse(exitCode, forecastOut.text)
     }
+    onRunningChanged: {
+      if (running || answered) return
+      if (cancelled) {
+        cancelled = false
+        root.checking = false
+        return
+      }
+      root.applyForecastResponse(-1, "")
+    }
+
+    stdout: StdioCollector { id: forecastOut; waitForEnd: true }
   }
 
-  // Reduce one sampled point to the worst thing it forecasts inside the lead
-  // window. Returns null for a response that carries no usable series.
-  function summarizePoint(entry, peakCape, peakGust) {
-    if (!entry || !entry.minutely_15) return null
+  function applyForecastResponse(exitCode, text) {
+    checking = false
+    lastAnswerTime = Date.now()
 
-    var precipitation = entry.minutely_15.precipitation || []
-    var times = entry.minutely_15.time || []
+    // Answered a question nobody is asking any more. Applying it would report
+    // one place's forecast under another place's name — the body ends with
+    // whatever `locationName` holds now, not with the city the request went out
+    // for — or would summarise the old window with the new one's slot count.
+    // Neither the failure count nor the outlook learns anything from it; what
+    // it earns is the request the change never got to make.
+    var lat = parseFloat(location.latitude)
+    var lon = parseFloat(location.longitude)
+    if (requestedFor !== "" && (!isFinite(lat) || !isFinite(lon)
+        || forecastRequestKey(lat, lon) !== requestedFor)) {
+      requestedFor = ""
+      checkNow()
+      return
+    }
+    requestedFor = ""
 
-    var level = 0
-    var lead = 0
-    var peak = 0
-    var clock = ""
-
-    for (var i = 0; i < precipitation.length && i < forecastSlots; i++) {
-      var mm = Number(precipitation[i]) || 0
-      if (mm > peak) peak = mm
-      var slotLevel = levelForPrecipitation(mm)
-      if (slotLevel === 0) continue
-      // Precipitation into an unstable airmass is what turns a shower into a
-      // storm; promote one band when the environment supports it.
-      if (slotLevel >= 2 && severeConditions(peakCape, peakGust)) slotLevel = Math.min(4, slotLevel + 1)
-      if (slotLevel > level) {
-        level = slotLevel
-        // Index 0 is the 15-minute slot already under way, so it reads as now.
-        lead = i * 15
-        // Taken from the response rather than computed as now-plus-lead, so
-        // the stated time is the model's own slot and cannot drift.
-        clock = clockFromTimestamp(times[i])
-      }
+    if (exitCode !== 0) {
+      consecutiveFailures++
+      return
     }
 
-    return { level: level, lead: lead, peak: peak, clock: clock }
-  }
+    var raw = String(text || "").trim()
+    if (raw === "") {
+      consecutiveFailures++
+      return
+    }
 
-  function peakOf(series) {
-    var highest = 0
-    if (!series) return highest
-    for (var i = 0; i < series.length; i++) highest = Math.max(highest, Number(series[i]) || 0)
-    return highest
+    var data
+    try {
+      data = JSON.parse(raw)
+    } catch (e) {
+      consecutiveFailures++
+      return
+    }
+
+    consecutiveFailures = 0
+    applyForecast(data)
   }
 
   function applyForecast(data) {
-    // One coordinate returns an object, several return an array. Normalising
-    // here keeps the rest of the function indifferent to how many were asked
-    // for.
-    var entries = Array.isArray(data) ? data : [data]
-    if (entries.length === 0) return
-
-    // Instability is a property of the airmass rather than of any one grid
-    // cell, so it is taken across the whole sampled area before the bands are
-    // applied — the same promotion then holds for every point.
-    var peakCape = 0
-    var peakGust = 0
-    for (var e = 0; e < entries.length; e++) {
-      if (!entries[e] || !entries[e].hourly) continue
-      peakCape = Math.max(peakCape, peakOf(entries[e].hourly.cape))
-      peakGust = Math.max(peakGust, peakOf(entries[e].hourly.wind_gusts_10m))
-    }
-
-    // The worst of the sampled points wins, and among equals the soonest. A
-    // town is not a point: reporting the centre alone would stay quiet through
-    // a storm sitting over the far side of it.
-    var worst = null
-    var peak = 0
-    for (var p = 0; p < entries.length; p++) {
-      var summary = summarizePoint(entries[p], peakCape, peakGust)
-      if (!summary) continue
-      peak = Math.max(peak, summary.peak)
-      if (!worst
-          || summary.level > worst.level
-          || (summary.level === worst.level && summary.lead < worst.lead)) {
-        worst = summary
-      }
-    }
-    if (!worst) return
+    var outlook = Alerts.summarizeForecast(data, forecastSlots)
+    // Null means the response carried nothing usable. Keeping the previous
+    // outlook is right; overwriting it with zeros would report fair weather on
+    // the strength of a broken response.
+    if (!outlook) return
 
     forecast = data
-    outlookCape = peakCape
-    outlookGust = peakGust
-    outlookPrecipitation = peak
-    outlookLeadMinutes = worst.lead
-    outlookAtClock = worst.clock
-    outlookLevel = worst.level
+    outlookCape = outlook.cape
+    outlookGust = outlook.gust
+    outlookPrecipitation = outlook.precipitation
+    outlookLeadMinutes = outlook.leadMinutes
+    outlookAtClock = outlook.clock
+    outlookLevel = outlook.level
     lastCheckTime = Date.now()
 
     evaluateAlert()
@@ -522,121 +586,36 @@ Item {
   property int notifiedLevel: 0
 
   function evaluateAlert() {
-    if (!alertsEnabled) {
-      notifiedLevel = 0
-      return
-    }
-
-    var threshold = levelValue(alertThreshold)
-
-    if (outlookLevel < threshold) {
-      // Clear the latch only once conditions drop under the threshold, so a
-      // reading that flickers around the boundary cannot re-notify.
-      notifiedLevel = 0
-      return
-    }
-
-    if (outlookLevel <= notifiedLevel) return
-
-    notifiedLevel = outlookLevel
-    notify(outlookLevel, outlookLeadMinutes)
+    var decision = Alerts.decideNotification(outlookLevel, notifiedLevel, alertThreshold, alertsEnabled)
+    notifiedLevel = decision.notifiedLevel
+    if (decision.notify) notify()
   }
 
-  // The figures behind a severe alert, naming only the ones that put it there.
-  //
-  // A severe reading can arrive by two routes — rain heavy enough on its own,
-  // or ordinary rain into an unstable airmass — and each is evidenced by
-  // different numbers. Printing all of them regardless produces sentences that
-  // argue against themselves: "severe storm, gusts to 17 km/h" reads as a
-  // contradiction, because a gust that mild had nothing to do with the verdict.
-  // Each figure appears only when it is part of the reason.
-  function severityDetail(level) {
-    if (level < 4) return ""
-
-    var reasons = []
-    var ratePerHour = outlookPrecipitation * 4
-    if (ratePerHour >= 15.0) reasons.push("up to " + Math.round(ratePerHour) + " mm/h")
-    if (outlookCape >= 2000) reasons.push("CAPE " + Math.round(outlookCape) + " J/kg")
-    if (outlookGust >= 45) reasons.push("gusts to " + Math.round(outlookGust) + " km/h")
-
-    return reasons.length > 0 ? " — " + reasons.join(", ") : ""
-  }
-
-  function notify(level, lead) {
-    var name = levelName(level)
-
-    // Already under way reads differently from on its way. This is the normal
-    // case when someone turns alerts on during weather they can already see,
-    // where "approaching" would contradict the "starting now" beneath it.
-    var underway = lead <= 0
-    var headline = level >= 4
-      ? (underway ? "Severe storm overhead" : "Severe storm approaching")
-      : (underway ? name + " rain now" : name + " rain approaching")
-
-    // Both a relative and an absolute time. The relative one is what the eye
-    // wants at the moment the toast appears; the absolute one is what saves it
-    // from lying to someone who reads it later, or who was away from the desk
-    // when it arrived.
-    var whenText = underway ? "under way" : "in about " + humanizeMinutes(lead)
-    if (outlookAtClock !== "") whenText += underway ? " since " + outlookAtClock : ", around " + outlookAtClock
-
-    var description = whenText
-    if (locationName !== "") description += " at " + locationName
-    description += severityDetail(level)
-
-    // How long the toast stays. Omarchy gives a critical popup no expiry and
-    // caps everything else at thirty seconds, so "until dismissed" is only
-    // reachable through the urgency.
-    //
-    // Heavy and above therefore go out as critical. The value of an alert
-    // lies entirely in the moment nobody was looking, and a timed toast that
-    // fires while the desk is empty is a toast that never happened — which is
-    // the case the alert exists for. Heavy is also the default threshold, the
-    // level this plugin itself calls worth interrupting someone over, so
-    // letting it expire unseen would contradict that. The cost is one click.
-    //
-    // Critical here does not mean emergency. Omarchy only lets a popup through
-    // Do Not Disturb when the sender is CLI-style, and this one names itself,
-    // so a silenced session files these into history instead of showing
-    // them.
-    //
-    // Moderate and Light stay on the eight-second default. They are worth
-    // saying and not worth camping on the screen.
-    var persistent = level >= 3
-    var command = [
-      "omarchy-notification-send",
-      "--app-name", "Weather Radar",
-      // The same glyph the bar widget wears, so the toast is recognisably
-      // from this plugin before a word of it is read.
-      "-g", RadarModel.GLYPH,
-      "-u", persistent ? "critical" : "normal"
-    ]
+  function notify() {
+    var text = Alerts.notificationText({
+      level: outlookLevel,
+      leadMinutes: outlookLeadMinutes,
+      clock: outlookAtClock,
+      precipitation: outlookPrecipitation,
+      cape: outlookCape,
+      gust: outlookGust
+    }, locationName)
 
     // Deliberately no click action. A click on a toast means "I have seen
     // this, go away" to almost everyone, and taking that gesture to open a
     // window instead answers a question the reader did not ask: they have been
     // told it is going to rain, which is the whole point of telling them.
-    // Anyone who wants the map opens it themselves.
-    notifyProc.command = command.concat([headline, description])
+    notifyProc.command = [
+      "omarchy-notification-send",
+      "--app-name", "Weather Radar",
+      // The same glyph the bar widget wears, so the toast is recognisably from
+      // this plugin before a word of it is read.
+      "-g", Glyphs.RADAR,
+      "-u", text.urgency,
+      text.headline,
+      text.description
+    ]
     notifyProc.running = true
-  }
-
-  // Open-Meteo returns local ISO timestamps like "2026-08-15T20:15" because
-  // the request asks for timezone=auto, so the clock part is already in the
-  // user's own time and needs no conversion.
-  function clockFromTimestamp(value) {
-    var text = String(value || "")
-    var marker = text.indexOf("T")
-    if (marker === -1) return ""
-    return text.substring(marker + 1, marker + 6)
-  }
-
-  function humanizeMinutes(minutes) {
-    if (minutes < 60) return minutes + " min"
-    var hours = Math.floor(minutes / 60)
-    var rest = minutes % 60
-    if (rest === 0) return hours + "h"
-    return hours + "h" + (rest < 10 ? "0" + rest : rest)
   }
 
   Process {
@@ -733,7 +712,9 @@ Item {
   onAlertsEnabledChanged: {
     if (!alertsEnabled) {
       notifiedLevel = 0
-      outlookLevel = 0
+      discardReading()
+      // Stopping the process produces an exit code, and it is not an outage.
+      if (forecastProc.running) forecastProc.cancelled = true
       forecastProc.running = false
       checking = false
     } else if (hasLocation) {
@@ -748,12 +729,15 @@ Item {
   readonly property string barSummary: {
     if (!hasLocation) return ""
     if (!alertsEnabled) return ""
+    // No reading at all while checks are failing is not fair weather. "clear"
+    // there would be the plugin's own silence dressed up as an answer.
+    if (lastCheckTime <= 0) return consecutiveFailures > 0 ? "unavailable" : ""
     if (outlookLevel === 0) return "clear"
     // Clock rather than countdown: the label only refreshes when a check runs,
     // so a relative figure would be up to ten minutes out of date on screen,
     // while a time stays correct between checks.
     var when = outlookAtClock !== "" ? outlookAtClock
-      : (outlookLeadMinutes <= 0 ? "now" : humanizeMinutes(outlookLeadMinutes))
+      : (outlookLeadMinutes <= 0 ? "now" : Alerts.humanizeMinutes(outlookLeadMinutes))
     return outlookLabel.toLowerCase() + " " + when
   }
 }

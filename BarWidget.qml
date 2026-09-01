@@ -1,6 +1,8 @@
 import QtQuick
 import qs.Commons
-import "RadarModel.js" as RadarModel
+import "lib/Alerts.js" as Alerts
+import "lib/Glyphs.js" as Glyphs
+import "lib/Settings.js" as Settings
 import qs.Ui
 
 // Bar pill for the radar plugin.
@@ -16,10 +18,10 @@ BarWidget {
 
   readonly property var radar: bar && bar.shell ? bar.shell.serviceFor("eduardodallecort.weather-radar") : null
 
-  // Defined in RadarModel so the bar and the notification cannot drift.
-  readonly property string icon: RadarModel.GLYPH
+  // Defined in Glyphs so the bar and the notification cannot drift.
+  readonly property string icon: Glyphs.RADAR
 
-  readonly property bool showLabel: setting("showLabel", false) === true
+  readonly property bool showLabel: Settings.showLabel(settings)
   readonly property string summary: radar ? radar.barSummary : ""
   readonly property int outlookLevel: radar ? radar.outlookLevel : 0
 
@@ -31,8 +33,8 @@ BarWidget {
   // the bar does not become a christmas tree.
   readonly property color iconColor: {
     if (!radar || !radar.alertsEnabled) return defaultForeground
-    if (outlookLevel >= 4) return Color.urgent
-    if (outlookLevel >= 3) return Color.accent
+    if (outlookLevel >= Alerts.SEVERE) return Color.urgent
+    if (outlookLevel >= Alerts.HEAVY) return Color.accent
     return defaultForeground
   }
 

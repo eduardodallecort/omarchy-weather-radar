@@ -1,0 +1,149 @@
+name: CI
+
+# Three things run here, and none needs Omarchy installed.
+#
+# The unit tests cover the projection, the RainViewer and Open-Meteo parsing,
+# the alert bands and the settings coercion — everything that lives in `lib/`
+# as a plain function. The QML job runs `Service.qml` itself under Quickshell,
+# which is the only check that the shell-facing half of the plugin is even
+# loadable. The listing checks cover what the marketplace re-verifies every day
+# for as long as the plugin stays listed: a repository that fails them loses
+# its install button within a day, silently.
+#
+# What is deliberately absent: qmllint, `omarchy plugin validate`, and any
+# exercise of `Panel.qml` or `BarWidget.qml`. All three need the shell's own
+# `qs.Commons` and `qs.Ui` on the import path, which do not exist on a runner,
+# so a job pretending to check them would only ever report that it could not
+# resolve the imports. `Service.qml` imports nothing but QtQuick and
+# Quickshell, which is why it alone can run here.
+
+on:
+  push:
+    branches: [master]
+    # Without this the workflow never fires on a tag, and the version check
+    # below — whose whole condition is "we are on a tag" — could never run.
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Run the library tests
+        run: node --test
+
+  qml:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      # `extra`, not the AUR, so this is one package and no build. python is
+      # for the listener in test/text-format.sh; qml6 arrives with Quickshell's
+      # own dependency on qt6-declarative.
+      - name: Install Quickshell
+        run: pacman -Syu --noconfirm --needed quickshell git python
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # No compositor and no session: the service opens no windows, so it runs
+      # against the offscreen platform with a runtime directory of its own.
+      # `curl` and `omarchy-weather-location` are replaced inside the script,
+      # so nothing here reaches Open-Meteo or RainViewer.
+      - name: A machine that has never set a weather location
+        env:
+          QT_QPA_PLATFORM: offscreen
+          XDG_RUNTIME_DIR: /tmp/runtime
+          # The script skips when there is no `qs`, which is right for someone
+          # running the suite on a machine without Quickshell and wrong here:
+          # it would report success for a check it never ran.
+          RADAR_REQUIRE_QS: "1"
+        run: |
+          mkdir -p /tmp/runtime
+          ./test/first-run.sh
+
+      # test/qml-source.test.js establishes that every Text declares
+      # Text.PlainText and that the notification body makes the place name
+      # inert. That is source inspection. This renders those strings under Qt
+      # and watches a socket, so the claim rests on what Qt does.
+      # A response is only an answer to the question that was asked. This one
+      # changes the city while a forecast request is in flight and reads the
+      # toast that comes out.
+      - name: A forecast answers the question that was asked
+        env:
+          QT_QPA_PLATFORM: offscreen
+          XDG_RUNTIME_DIR: /tmp/runtime
+          RADAR_REQUIRE_QS: "1"
+        run: ./test/stale-forecast.sh
+
+      - name: A place name cannot make the shell fetch a URL
+        env:
+          QT_QPA_PLATFORM: offscreen
+          XDG_RUNTIME_DIR: /tmp/runtime
+          RADAR_REQUIRE_QS: "1"
+        run: ./test/text-format.sh
+
+  listable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: A README and a licence exist at the root
+        run: |
+          test -f README.md
+          test -f LICENSE || test -f LICENCE || test -f COPYING
+
+      - name: The manifest parses and declares this plugin
+        run: |
+          jq -e '.schemaVersion == 1' manifest.json > /dev/null
+          jq -e '.id == "eduardodallecort.weather-radar"' manifest.json > /dev/null
+          jq -e '.license and .author and .description' manifest.json > /dev/null
+
+      - name: Every declared entry point exists
+        run: |
+          jq -r '.entryPoints | to_entries[] | .value' manifest.json |
+            while read -r path; do
+              test -f "$path" || { echo "missing entry point: $path"; exit 1; }
+            done
+
+      # Only on a tag build. Pushing the branch skips this; pushing the tag
+      # afterwards is what exercises it.
+      - name: The version in the manifest matches the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          manifest=$(jq -r '.version' manifest.json)
+          tag="${GITHUB_REF_NAME#v}"
+          test "$manifest" = "$tag" || {
+            echo "manifest.json says $manifest, tag says $tag"; exit 1; }
+
+      # A symlink anywhere in the tree fails marketplace validation, and nothing
+      # local complains: the listing simply breaks on the next daily check. The
+      # symlink that makes development work lives outside the repository, in
+      # ~/.config/omarchy/plugins/, which is why one inside is always a mistake.
+      - name: No symlinks in the plugin folder
+        run: |
+          found=$(find . -path ./.git -prune -o -type l -print)
+          test -z "$found" || { echo "symlinks found:"; echo "$found"; exit 1; }
+
+      # The catalogue tries preview.* in extension order, so a second file in a
+      # higher-priority format silently wins over the one already there,
+      # whatever its date.
+      - name: Exactly one preview image
+        run: |
+          found=""
+          for candidate in preview.png preview.webp preview.jpg preview.jpeg preview.avif; do
+            test -f "$candidate" && found="$found $candidate"
+          done
+          count=$(echo $found | wc -w)
+          test "$count" -eq 1 || { echo "expected one preview.*, found:$found"; exit 1; }
+          echo "preview:$found"

@@ -3,16 +3,27 @@ import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
-import "TileMath.js" as TileMath
-import "RadarModel.js" as RadarModel
+import "ui"
+import "lib/Alerts.js" as Alerts
+import "lib/Frames.js" as Frames
+import "lib/Settings.js" as Settings
+import "lib/TileMath.js" as TileMath
+import "lib/RadarModel.js" as RadarModel
 
-// The radar map.
+// The radar panel.
 //
 // Opens centred on the location Omarchy already knows about, stacks the latest
 // radar frame over a basemap, and can play the last two hours as a loop. The
-// alert toggle lives down here rather than only in the settings form, so
-// turning the watch on is one click from the thing you are looking at — the
-// same shape as the audio panel's mute switch.
+// alert toggle lives down here, so turning the watch on is one click from the
+// thing you are looking at, the way the audio panel keeps its mute switch
+// beside the thing it mutes — and because a schema entry is not an interface:
+// nothing in the installed shell renders one, so a control that is not in a
+// panel is nowhere. See Settings.js.
+//
+// This file owns the state the pieces in ui/ share — where the map is looking,
+// which frame is on screen, what is being edited — plus the lifecycle, the
+// keyboard map and the IPC surface. Everything drawn is a component in ui/;
+// everything computed is a function in lib/.
 Panel {
   id: root
   moduleName: "eduardodallecort.weather-radar"
@@ -32,56 +43,21 @@ Panel {
   // Settings
   // ---------------------------------------------------------------------------
 
-  readonly property bool alertsEnabled: setting("alertsEnabled", false) === true
-  readonly property int alertRadiusKm: Math.max(25, Math.min(250, Number(setting("alertRadiusKm", 100)) || 100))
+  // Every reading goes through Settings.js, which the service reads through as
+  // well, so the panel and the alert that fires from it cannot disagree about
+  // what the user configured.
+  readonly property bool alertsEnabled: Settings.alertsEnabled(settings)
+  readonly property int alertRadiusKm: Settings.alertRadiusKm(settings)
+  readonly property var radiusPresets: Settings.radiusPresets(alertRadiusKm)
+  readonly property string alertThreshold: Settings.alertThreshold(settings)
+  readonly property var thresholdOptions: Alerts.THRESHOLD_OPTIONS
+  readonly property bool smoothTiles: Settings.smoothTiles(settings)
+  readonly property bool showSnow: Settings.showSnow(settings)
+  readonly property int colorSchemeId: Settings.colorSchemeId(settings)
 
-  // Offered in the panel as a few presets rather than a free number. The
-  // radius is really a question about warning time — the service converts it
-  // at an assumed 50 km/h — and storms travel anywhere from 40 to 60, so
-  // treating 137 km as meaningfully different from 150 would be precision the
-  // underlying model does not have. The settings form still takes any value in
-  // 25 km steps, and a value set there that is not a preset is added to the
-  // list rather than silently dropped.
-  readonly property var radiusPresets: {
-    var presets = [50, 100, 150, 200]
-    if (presets.indexOf(alertRadiusKm) === -1) {
-      presets.push(alertRadiusKm)
-      presets.sort(function(a, b) { return a - b })
-    }
-    return presets.map(function(km) { return String(km) })
-  }
-
-  readonly property int alertLeadMinutes: radar ? radar.leadMinutes : Math.round(alertRadiusKm / 50 * 60)
-
-  readonly property string alertThreshold: String(setting("alertMinIntensity", "Heavy"))
-  readonly property var thresholdOptions: ["Light", "Moderate", "Heavy", "Severe"]
-
-  // Says what the chosen band actually means in weather, rather than leaving
-  // the user to guess where the line between "Moderate" and "Heavy" falls.
-  function thresholdCaption(name) {
-    if (name === "Light") return "anything from drizzle up"
-    if (name === "Moderate") return "steady rain and worse"
-    if (name === "Severe") return "only severe storms"
-    return "downpours and storms"
-  }
-
-  function humanizeLead(minutes) {
-    if (minutes < 60) return minutes + " min"
-    var hours = Math.floor(minutes / 60)
-    var rest = minutes % 60
-    if (rest === 0) return hours + " h"
-    return hours + " h " + rest + " min"
-  }
-  readonly property bool smoothTiles: setting("smoothTiles", true) === true
-  readonly property bool showSnow: setting("showSnow", true) === true
-
-  readonly property int colorSchemeId: {
-    var name = String(setting("colorScheme", "TITAN"))
-    for (var i = 0; i < RadarModel.COLOR_SCHEMES.length; i++) {
-      if (RadarModel.COLOR_SCHEMES[i].name === name) return RadarModel.COLOR_SCHEMES[i].id
-    }
-    return 2
-  }
+  // The service is the authority on lead time whenever it is mounted; the
+  // fallback covers the moment before it is.
+  readonly property int alertLeadMinutes: radar ? radar.leadMinutes : Alerts.leadMinutesFor(alertRadiusKm)
 
   // Write one field back to this widget's inline shell.json entry, preserving
   // every other field. Same approach the first-party panels use.
@@ -133,11 +109,22 @@ Panel {
 
   onRadarChanged: updateHome()
   readonly property string locationName: radar ? radar.locationName : ""
+  readonly property string locationState: radar ? radar.locationState : "unset"
 
   property real viewLatitude: 0
   property real viewLongitude: 0
-  property int zoom: Math.max(RadarModel.MIN_RADAR_ZOOM,
-    Math.min(RadarModel.MAX_MAP_ZOOM, Number(setting("defaultZoom", 7)) || 7))
+  property int zoom: Settings.defaultZoom(settings)
+
+  // The map's own height, declared once because the limit on how far north or
+  // south the view may sit is a question about the viewport rather than about
+  // the centre: half a panel of world has to stay on each side of it.
+  readonly property real mapHeight: Style.space(320)
+
+  // Reapplied on zoom as well as on panning. Zooming out makes the same panel
+  // cover more of the globe, so a centre that was legal deep in stops being
+  // legal — and without this, zooming out near a pole puts the world's edge
+  // across the middle of the map with nothing beyond it.
+  onZoomChanged: viewLatitude = TileMath.constrainLatitude(viewLatitude, zoom, mapHeight)
 
   // The radar layer stops requesting new detail here and gets scaled up
   // instead, so the basemap can keep sharpening past the data's limit.
@@ -148,7 +135,7 @@ Panel {
     // Nothing to centre on before a location exists; recentring on the
     // placeholder would move the view to 0,0 rather than leave it alone.
     if (!hasLocation) return
-    viewLatitude = homeLatitude
+    viewLatitude = TileMath.constrainLatitude(homeLatitude, zoom, mapHeight)
     viewLongitude = homeLongitude
   }
 
@@ -183,8 +170,8 @@ Panel {
     editingLocation = true
     locationSuggestions = []
     suggestionIndex = 0
-    locationField.text = root.locationName
-    Qt.callLater(function() { locationField.forceActiveFocus() })
+    locationPicker.query = root.locationName
+    Qt.callLater(function() { locationPicker.focusQuery() })
   }
 
   function cancelEditingLocation() {
@@ -197,7 +184,7 @@ Panel {
   }
 
   function commitLocation() {
-    var choice = RadarModel.locationCommit(locationField.text, locationSuggestions, suggestionIndex)
+    var choice = RadarModel.locationCommit(locationPicker.query, locationSuggestions, suggestionIndex)
     if (!choice.name) {
       clearLocation()
       return
@@ -232,6 +219,7 @@ Panel {
       locationSaveProc.command = ["omarchy-weather-location", "--set", name]
     else
       locationSaveProc.command = ["omarchy-weather-location", "--clear"]
+    locationSaveProc.answered = false
     locationSaveProc.running = true
   }
 
@@ -239,7 +227,7 @@ Panel {
   // keystroke. Only one curl is in flight at a time; a query that moved on
   // while a fetch was running is issued as soon as that one returns.
   function requestGeocode() {
-    var query = locationField.text.trim()
+    var query = locationPicker.query.trim()
     if (query.length < 2) {
       locationSuggestions = []
       return
@@ -250,7 +238,8 @@ Panel {
 
   function startGeocode() {
     geocodeActiveQuery = geocodePendingQuery
-    geocodeProc.command = ["curl", "-fsS", "--max-time", "5", RadarModel.geocodingUrl(geocodeActiveQuery, 5)]
+    geocodeProc.answered = false
+    geocodeProc.command = RadarModel.geocodingCommand(geocodeActiveQuery, 5)
     geocodeProc.running = true
   }
 
@@ -262,43 +251,80 @@ Panel {
 
   Process {
     id: geocodeProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.locationSuggestions = root.editingLocation ? RadarModel.parseGeocodingResults(text) : []
-        root.suggestionIndex = 0
-        if (root.geocodePendingQuery !== root.geocodeActiveQuery) Qt.callLater(root.startGeocode)
-      }
+
+    // A process that cannot be started emits neither `started` nor `exited`.
+    // Without an answer the search field would keep whatever suggestions it
+    // had and never ask again for the query the user has since typed.
+    property bool answered: false
+
+    onExited: function(exitCode) {
+      answered = true
+      root.applyGeocodeResponse(exitCode, geocodeOut.text)
     }
+    onRunningChanged: if (!running && !answered) root.applyGeocodeResponse(-1, "")
+
+    // The collector holds the output and decides nothing: `onStreamFinished`
+    // runs before the exit code exists, so a search cut short by the time or
+    // size ceiling would be read as a search that found nothing.
+    stdout: StdioCollector { id: geocodeOut; waitForEnd: true }
+  }
+
+  function applyGeocodeResponse(exitCode, text) {
+    // A failed search leaves no suggestions rather than stale ones: a list
+    // from the previous query, under the letters just typed, is a wrong answer
+    // presented as a current one.
+    root.locationSuggestions = (exitCode === 0 && root.editingLocation)
+      ? RadarModel.parseGeocodingResults(text) : []
+    root.suggestionIndex = 0
+
+    // Only when there is still a search to run. cancelEditingLocation() clears
+    // the pending query, and a successful save routes through it too — so a
+    // request in flight when the user presses Escape would come back, find
+    // pending and active different, and go out again for the empty string:
+    // a real call to the geocoder for nothing, after the field is closed.
+    if (!root.editingLocation || root.geocodePendingQuery === "") return
+    if (root.geocodePendingQuery !== root.geocodeActiveQuery) Qt.callLater(root.startGeocode)
   }
 
   Process {
     id: locationSaveProc
+
+    // See geocodeProc. `savingLocation` is cleared only from here, so a fork
+    // that never happened would leave the spinner turning and the field
+    // disabled for as long as the panel lives.
+    property bool answered: false
+
     onExited: function(exitCode) {
-      root.savingLocation = false
-      if (exitCode !== 0) return
-
-      // Clear `panned` before anything can deliver a location, so the order of
-      // what follows cannot decide whether the map recentres.
-      root.panned = false
-
-      // Recentre now only when what was saved is what home already holds —
-      // re-choosing the stored city, where identical coordinates mean no
-      // property changes and so nothing else would fire. Doing it
-      // unconditionally would snap the map to the previous city first on a
-      // move, and onto the city just removed on a clear.
-      if (isFinite(root.pendingLatitude)
-          && root.pendingLatitude === root.homeLatitude
-          && root.pendingLongitude === root.homeLongitude) root.recenter()
-
-      // Then ask the service to re-read rather than waiting for its file watch.
-      // The first location ever written lands in a directory that did not exist
-      // when that watch was set up, so nothing would announce it. A different
-      // city arrives asynchronously and recentres again.
-      if (root.radar && root.radar.reloadLocation) root.radar.reloadLocation()
-
-      root.cancelEditingLocation()
+      answered = true
+      root.applyLocationSave(exitCode)
     }
+    onRunningChanged: if (!running && !answered) root.applyLocationSave(-1)
+  }
+
+  function applyLocationSave(exitCode) {
+    root.savingLocation = false
+    if (exitCode !== 0) return
+
+    // Clear `panned` before anything can deliver a location, so the order of
+    // what follows cannot decide whether the map recentres.
+    root.panned = false
+
+    // Recentre now only when what was saved is what home already holds —
+    // re-choosing the stored city, where identical coordinates mean no
+    // property changes and so nothing else would fire. Doing it
+    // unconditionally would snap the map to the previous city first on a
+    // move, and onto the city just removed on a clear.
+    if (isFinite(root.pendingLatitude)
+        && root.pendingLatitude === root.homeLatitude
+        && root.pendingLongitude === root.homeLongitude) root.recenter()
+
+    // Then ask the service to re-read rather than waiting for its file watch.
+    // The first location ever written lands in a directory that did not exist
+    // when that watch was set up, so nothing would announce it. A different
+    // city arrives asynchronously and recentres again.
+    if (root.radar && root.radar.reloadLocation) root.radar.reloadLocation()
+
+    root.cancelEditingLocation()
   }
 
   // ---------------------------------------------------------------------------
@@ -309,21 +335,61 @@ Panel {
   property int frameIndex: 0
   property bool playing: false
 
+  // What the user is looking at, expressed so that it survives the list being
+  // replaced: the moment on screen, and whether they chose to follow the newest
+  // frame. Both are recorded while the list that produced them is still in
+  // hand — an index into the old list means nothing in the new one, and the
+  // panel outlives many replacements.
+  property real shownTime: 0
+  property bool followingLatest: true
+
+  // Bumped whenever the list is replaced. At an unchanged index a new manifest
+  // is still a different frame, and without this the radar layers keep the
+  // tiles they already have.
+  property int frameEpoch: 0
+
   readonly property var currentFrame: {
-    if (!frames || frames.length === 0) return null
-    var index = Math.max(0, Math.min(frames.length - 1, frameIndex))
-    return frames[index]
+    var index = Frames.clampIndex(frames, frameIndex)
+    return index < 0 ? null : frames[index]
   }
 
   readonly property string frameLabel: currentFrame ? RadarModel.formatFrameTime(currentFrame.time) : "--:--"
-  readonly property bool isLatestFrame: frames.length > 0 && frameIndex >= frames.length - 1
+  readonly property bool isLatestFrame: Frames.isLatest(frames, frameIndex)
 
-  // A new manifest arrives every ten minutes. Someone parked on the newest
-  // frame wants to stay on the newest frame; someone scrubbing through history
-  // wants to stay where they put the cursor.
+  // Jump to the newest frame in hand, and follow it from here. What "newest"
+  // means is decided again each time the list is replaced, so this holds even
+  // when the list on screen is hours old and the real one has not arrived yet.
+  function showLatestFrame() {
+    followingLatest = true
+    var latest = frames.length - 1
+    if (latest >= 0 && frameIndex !== latest) frameIndex = latest
+    else recordShownFrame()
+  }
+
+  function recordShownFrame() {
+    var frame = currentFrame
+    shownTime = frame ? frame.time : 0
+    followingLatest = Frames.isLatest(frames, frameIndex)
+  }
+
+  // A new manifest arrives every ten minutes, and the panel is opened against
+  // lists it has never seen. Someone parked on the newest frame wants the
+  // newest frame whatever the new list looks like; someone who scrubbed back to
+  // a time wants that time, at whatever index it now sits.
   onFramesChanged: {
     if (frames.length === 0) return
-    if (frameIndex >= frames.length - 1 || frameIndex === 0) frameIndex = frames.length - 1
+    frameEpoch++
+
+    var next = Frames.reselect(frames, shownTime, followingLatest)
+    if (next !== frameIndex) {
+      frameIndex = next
+    } else {
+      // The same position in a different list is a different frame, so the
+      // layers are told even though the index did not move.
+      showFrame(frameIndex)
+      recordShownFrame()
+    }
+
     if (frameA < 0) { frameA = frameIndex; frontIsA = true }
   }
 
@@ -335,7 +401,10 @@ Panel {
   property int frameB: -1
   property bool frontIsA: true
 
-  onFrameIndexChanged: showFrame(frameIndex)
+  onFrameIndexChanged: {
+    showFrame(frameIndex)
+    recordShownFrame()
+  }
 
   function showFrame(index) {
     if (index < 0 || frames.length === 0) return
@@ -359,10 +428,7 @@ Panel {
     interval: root.isLatestFrame ? 1500 : 550
     repeat: true
     running: root.playing && root.opened && root.frames.length > 1
-    onTriggered: {
-      if (root.frameIndex >= root.frames.length - 1) root.frameIndex = 0
-      else root.frameIndex++
-    }
+    onTriggered: root.frameIndex = Frames.nextIndex(root.frames, root.frameIndex)
   }
 
   // ---------------------------------------------------------------------------
@@ -412,11 +478,34 @@ Panel {
   }
 
   function onOpened() {
-    if (!panned && hasLocation) recenter()
+    // Opening is a question about now, so the view and the clock both start
+    // there. Wherever the map was left, and whatever moment was on the
+    // timeline, is where somebody was looking once — not where they are asking
+    // to look now. A moment scrubbed to two hours ago may not even be published
+    // any more, and the nearest surviving frame to it is the oldest one in the
+    // window: the furthest from the question being asked.
+    //
+    // While the panel is open the opposite holds, and Frames.reselect keeps
+    // whoever is studying a particular time on that time as the list moves
+    // under them.
+    panned = false
+    if (hasLocation) recenter()
+    showLatestFrame()
     if (root.radar && !manifestHeld) {
       root.radar.acquireManifest()
       manifestHeld = true
     }
+
+    // Opening the map is a request for current information, and the frames are
+    // not the only thing that can have gone stale or started failing while it
+    // was closed.
+    if (root.radar && root.radar.refreshIfStale) root.radar.refreshIfStale()
+
+    // Ask the tile layers to fetch again. Qt never retries an Image that
+    // failed, and the frame list can be current while the tiles under it were
+    // requested during an outage. Anything already held is served from the
+    // cache, so this costs a request only for what is actually missing.
+    frameEpoch++
     // The canvas can only read pixels while it is on screen, so opening is
     // the moment to ask.
     Qt.callLater(function() { coverageProbe.probe() })
@@ -447,17 +536,14 @@ Panel {
   // Basemap
   // ---------------------------------------------------------------------------
 
-  // CARTO's label-light basemaps, picked to match the theme rather than a
-  // fixed palette: radar over a bright map in a dark theme is unreadable.
-  readonly property bool darkTheme: {
-    var background = Color.background
-    return (0.2126 * background.r + 0.7152 * background.g + 0.0722 * background.b) < 0.5
-  }
-  readonly property string basemapStyle: darkTheme ? "dark_all" : "light_all"
+  // The ground is drawn from geometry that ships with the plugin, decoded once
+  // by the service. See ui/BasemapLayer.qml for why its colours follow the
+  // theme while the radar's do not.
+  readonly property var basemap: radar ? radar.basemap : null
 
-  function basemapTileUrl(z, x, y) {
-    return "https://basemaps.cartocdn.com/" + basemapStyle + "/" + z + "/" + x + "/" + y + ".png"
-  }
+  // Credit for everything drawn on the map, in one place so it cannot fall out
+  // of step with where the data actually comes from.
+  readonly property string attribution: "RainViewer · Natural Earth"
 
   function radarTileUrlA(z, x, y) { return root.radarTileUrlForFrame(root.frameA, z, x, y) }
   function radarTileUrlB(z, x, y) { return root.radarTileUrlForFrame(root.frameB, z, x, y) }
@@ -473,8 +559,9 @@ Panel {
   // answerable: fetch the mask centred on the user and read the middle pixel,
   // which is their location by construction.
   //
-  // The probe lives here rather than in the service because reading pixels
-  // needs a scene to render into, and a headless singleton has none.
+  // The probe is mounted in the panel's tree rather than in the service
+  // because reading pixels needs a scene to render into, and a headless
+  // singleton has none. See ui/CoverageProbe.qml.
 
   readonly property string coverageProbeUrl: {
     if (!radar || !radar.tileHost || !hasLocation) return ""
@@ -534,621 +621,151 @@ Panel {
         width: parent.width
         spacing: Style.space(10)
 
-        // ---- Map ------------------------------------------------------------
-        Item {
-          id: mapArea
+        RadarMap {
           width: parent.width
-          height: Style.space(320)
+          height: root.mapHeight
+          bar: root.bar
+          basemap: root.basemap
 
-          Rectangle {
-            anchors.fill: parent
-            color: root.darkTheme ? "#101014" : "#e8e8ec"
-            radius: Style.cornerRadius
-            clip: true
+          centerLatitude: root.viewLatitude
+          centerLongitude: root.viewLongitude
+          zoom: root.zoom
+          radarSourceZoom: root.radarSourceZoom
 
-            TileLayer {
-              id: basemapLayer
-              anchors.fill: parent
-              centerLatitude: root.viewLatitude
-              centerLongitude: root.viewLongitude
-              zoom: root.zoom
-              tileUrlFor: root.basemapTileUrl
+          radarTileUrlA: root.radarTileUrlA
+          radarTileUrlB: root.radarTileUrlB
+
+          frameA: root.frameA
+          frameB: root.frameB
+          frameEpoch: root.frameEpoch
+          frontIsA: root.frontIsA
+          colorSchemeId: root.colorSchemeId
+          smoothTiles: root.smoothTiles
+
+          hasLocation: root.hasLocation
+          homeLatitude: root.homeLatitude
+          homeLongitude: root.homeLongitude
+          alertsEnabled: root.alertsEnabled
+          alertRadiusKm: root.alertRadiusKm
+
+          loading: root.frames.length === 0
+          radarUnavailable: root.radar ? root.radar.frameFailures > 0 : false
+          attribution: root.attribution
+
+          onDragged: function(latitude, longitude) {
+            root.viewLatitude = TileMath.constrainLatitude(latitude, root.zoom, root.mapHeight)
+            // Normalised as it is stored, so panning east indefinitely keeps
+            // the centre a real coordinate rather than letting it grow without
+            // bound. The ground draws the world repeatedly either way; this is
+            // about what everything else positioned against the centre sees.
+            root.viewLongitude = TileMath.wrapLongitude(longitude)
+            root.panned = true
+          }
+          onRecenterRequested: {
+            root.panned = false
+            root.recenter()
+          }
+          onZoomRequested: function(zoom, latitude, longitude) {
+            root.zoom = zoom
+            var wrapped = TileMath.wrapLongitude(longitude)
+            // Zooming towards the pointer moves the view, so it counts as
+            // panning — otherwise the next location update would snap the map
+            // back. Zooming on the centre moves nothing and must not.
+            var constrained = TileMath.constrainLatitude(latitude, zoom, root.mapHeight)
+            if (!TileMath.samePosition(constrained, wrapped, root.viewLatitude, root.viewLongitude)) {
+              root.viewLatitude = constrained
+              root.viewLongitude = wrapped
+              root.panned = true
             }
+          }
 
-            // Two radar layers that trade places. See showFrame(): the next
-            // frame is loaded into whichever layer is behind, then the pair
-            // swaps opacity, so the loop dissolves instead of flickering.
-            TileLayer {
-              id: radarA
-              anchors.fill: parent
-              centerLatitude: root.viewLatitude
-              centerLongitude: root.viewLongitude
-              zoom: root.zoom
-              sourceZoom: root.radarSourceZoom
-              tileUrlFor: root.radarTileUrlA
-              revision: root.frameA + (root.colorSchemeId * 1000)
-              smooth: root.smoothTiles
-              opacity: root.frontIsA ? 1 : 0
-              Behavior on opacity {
-                NumberAnimation { duration: 380; easing.type: Easing.InOutQuad }
-              }
-            }
-
-            TileLayer {
-              id: radarB
-              anchors.fill: parent
-              centerLatitude: root.viewLatitude
-              centerLongitude: root.viewLongitude
-              zoom: root.zoom
-              sourceZoom: root.radarSourceZoom
-              tileUrlFor: root.radarTileUrlB
-              revision: root.frameB + (root.colorSchemeId * 1000)
-              smooth: root.smoothTiles
-              opacity: root.frontIsA ? 0 : 1
-              Behavior on opacity {
-                NumberAnimation { duration: 380; easing.type: Easing.InOutQuad }
-              }
-            }
-
-            // ---- Alert rings and home marker --------------------------------
-            Item {
-              anchors.fill: parent
-              visible: root.hasLocation
-
-              readonly property var home: TileMath.projectToViewport(
-                root.homeLatitude, root.homeLongitude,
-                root.viewLatitude, root.viewLongitude,
-                root.zoom, parent.width, parent.height)
-
-              readonly property real ringRadius: TileMath.kmToPixels(
-                root.alertRadiusKm, root.homeLatitude, root.zoom)
-
-              // Outer ring is the configured alert radius; the inner half-ring
-              // gives a sense of scale without needing a legend.
-              Repeater {
-                model: [0.5, 1.0]
-
-                Rectangle {
-                  required property real modelData
-                  readonly property real r: parent.ringRadius * modelData
-                  x: parent.home.x - r
-                  y: parent.home.y - r
-                  width: r * 2
-                  height: r * 2
-                  radius: r
-                  color: "transparent"
-                  border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b,
-                    modelData === 1.0 ? 0.55 : 0.3)
-                  border.width: 1
-                  visible: root.alertsEnabled && r > 6 && r < parent.width * 2
-                }
-              }
-
-              Rectangle {
-                readonly property real dot: Style.space(7)
-                x: parent.home.x - dot / 2
-                y: parent.home.y - dot / 2
-                width: dot
-                height: dot
-                radius: dot / 2
-                color: Color.accent
-                border.color: root.darkTheme ? "#000000" : "#ffffff"
-                border.width: 1
-              }
-            }
-
-            // ---- Pan and zoom -----------------------------------------------
-            MouseArea {
-              id: mapMouse
-              anchors.fill: parent
-              acceptedButtons: Qt.LeftButton
-              cursorShape: pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
-
-              property real lastX: 0
-              property real lastY: 0
-
-              onPressed: function(mouse) {
-                lastX = mouse.x
-                lastY = mouse.y
-              }
-
-              onPositionChanged: function(mouse) {
-                if (!pressed) return
-                var dx = mouse.x - lastX
-                var dy = mouse.y - lastY
-                if (dx === 0 && dy === 0) return
-                lastX = mouse.x
-                lastY = mouse.y
-
-                // Convert the drag into a new centre by asking which
-                // coordinate now sits under the middle of the viewport.
-                var moved = TileMath.unprojectFromViewport(
-                  width / 2 - dx, height / 2 - dy,
-                  root.viewLatitude, root.viewLongitude,
-                  root.zoom, width, height)
-                root.viewLatitude = moved.latitude
-                root.viewLongitude = moved.longitude
-                root.panned = true
-              }
-
-              onWheel: function(wheel) {
-                var direction = wheel.angleDelta.y > 0 ? 1 : -1
-                var next = Math.max(RadarModel.MIN_RADAR_ZOOM,
-                  Math.min(RadarModel.MAX_MAP_ZOOM, root.zoom + direction))
-                if (next !== root.zoom) root.zoom = next
-                wheel.accepted = true
-              }
-            }
-
-            // ---- Overlays ---------------------------------------------------
-            Text {
-              anchors.right: parent.right
-              anchors.bottom: parent.bottom
-              anchors.margins: Style.space(6)
-              text: "RainViewer · CARTO · OpenStreetMap"
-              color: root.bar ? root.bar.foreground : Color.foreground
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption * 0.8
-              opacity: 0.4
-            }
-
-            // Off-screen probe for the coverage mask. Kept at zero opacity
-            // rather than hidden: an invisible item is never rendered, and a
-            // Canvas that is never rendered never paints, so it would have
-            // nothing to read.
-            Canvas {
-              id: coverageProbe
-              width: 256
-              height: 256
-              opacity: 0
-              z: -1
-
-              property string probeUrl: root.coverageProbeUrl
-
-              // Driven explicitly rather than by the load signal alone. A
-              // canvas only paints while it is rendered, so a probe begun
-              // against a closed panel queues a repaint that never arrives,
-              // and an image already in Qt's cache does not re-emit
-              // imageLoaded to restart one.
-              function probe() {
-                if (probeUrl === "") return
-                if (isImageLoaded(probeUrl)) requestPaint()
-                else loadImage(probeUrl)
-              }
-
-              onProbeUrlChanged: probe()
-              onImageLoaded: requestPaint()
-
-              onPaint: {
-                if (probeUrl === "" || !isImageLoaded(probeUrl)) return
-                var ctx = getContext("2d")
-                ctx.clearRect(0, 0, width, height)
-                ctx.drawImage(probeUrl, 0, 0, width, height)
-                var pixels = ctx.getImageData(0, 0, width, height).data
-                var covered = RadarModel.hasCoverageAtCenter(pixels, width)
-                if (root.radar && root.radar.reportCoverage) root.radar.reportCoverage(covered)
-                if (!covered) console.log("weather-radar: no ground radar reaches the configured location")
-              }
-            }
-
-            // Shown while the manifest has not arrived yet, so an empty map
-            // during the first second does not read as "no rain".
-            Text {
-              anchors.centerIn: parent
-              visible: root.frames.length === 0
-              text: "Loading radar…"
-              color: root.bar ? root.bar.foreground : Color.foreground
-              font.family: Style.font.family
-              font.pixelSize: Style.font.body
-              opacity: 0.6
+          CoverageProbe {
+            id: coverageProbe
+            source: root.coverageProbeUrl
+            onResolved: function(covered) {
+              if (root.radar && root.radar.reportCoverage) root.radar.reportCoverage(covered)
+              if (!covered) console.log("weather-radar: no ground radar reaches the configured location")
             }
           }
         }
 
-        // ---- Timeline ---------------------------------------------------------
-        Item {
+        Timeline {
           width: parent.width
-          height: Style.spacing.controlHeight
-          visible: root.frames.length > 1
-
-          Button {
-            id: playButton
-            anchors.left: parent.left
-            anchors.leftMargin: Style.space(8)
-            anchors.verticalCenter: parent.verticalCenter
-            // Material Design play / pause, both present in every Nerd Font
-            // Omarchy ships.
-            text: root.playing ? "󰏤" : "󰐊"
-            fontFamily: Style.font.family
-            foreground: root.bar ? root.bar.foreground : Color.foreground
-            tooltipText: root.playing ? "Pause (Enter)" : "Play the last two hours (Enter)"
-            onClicked: root.playing = !root.playing
-          }
-
-          PanelSlider {
-            id: timeline
-            anchors.left: playButton.right
-            anchors.right: frameTime.left
-            anchors.leftMargin: Style.space(8)
-            anchors.rightMargin: Style.space(10)
-            anchors.verticalCenter: parent.verticalCenter
-            bar: root.bar
-            minimum: 0
-            maximum: Math.max(1, root.frames.length - 1)
-            integer: true
-            step: 1
-            tickCount: root.frames.length
-            value: root.frameIndex
-            onMoved: function(value) {
-              root.playing = false
-              root.frameIndex = Math.round(value)
-            }
-          }
-
-          // Fixed width, and no suffix that appears and disappears. The label
-          // sits at the end of the slider's anchor chain, so any change to its
-          // width resizes the track — which, mid-drag, slides the knob out
-          // from under the pointer. A clock that only ever renders five
-          // characters cannot do that, and the timestamp already says whether
-          // you are looking at the past.
-          Text {
-            id: frameTime
-            anchors.right: parent.right
-            anchors.rightMargin: Style.space(10)
-            anchors.verticalCenter: parent.verticalCenter
-            width: Style.space(44)
-            horizontalAlignment: Text.AlignRight
-            text: root.frameLabel
-            color: root.bar ? root.bar.foreground : Color.foreground
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
-            opacity: root.isLatestFrame ? 0.9 : 0.6
+          bar: root.bar
+          frames: root.frames
+          frameIndex: root.frameIndex
+          playing: root.playing
+          frameLabel: root.frameLabel
+          isLatestFrame: root.isLatestFrame
+          onPlayToggled: root.playing = !root.playing
+          onFrameRequested: function(index) {
+            root.playing = false
+            root.frameIndex = index
           }
         }
 
         PanelSeparator { width: parent.width }
 
-        // ---- Location ----------------------------------------------------------
-        Item {
-          width: parent.width
-          height: Style.spacing.controlHeight
-
-          // Resting state: the city name, click to change it.
-          Row {
-            visible: !root.editingLocation
-            anchors.left: parent.left
-            anchors.leftMargin: Style.space(12)
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.space(8)
-
-            Text {
-              anchors.verticalCenter: parent.verticalCenter
-              text: root.locationName !== "" ? root.locationName : "Set a location"
-              color: root.bar ? root.bar.foreground : Color.foreground
-              font.family: Style.font.family
-              font.pixelSize: Style.font.body
-              opacity: root.locationName !== "" ? 1 : 0.6
-            }
-
-            Text {
-              anchors.verticalCenter: parent.verticalCenter
-              text: "󰏫"
-              color: root.bar ? root.bar.foreground : Color.foreground
-              font.family: Style.font.family
-              font.pixelSize: Style.font.bodySmall
-              opacity: 0.45
-            }
-
-            // Sits beside the city rather than over the map: this is a fact
-            // about the configured location, not about whatever the view
-            // happens to be showing, and a message centred on a map that can
-            // be panned anywhere would claim the latter.
-            Text {
-              anchors.verticalCenter: parent.verticalCenter
-              visible: root.coverageMissing
-              text: "· no radar coverage"
-              color: Color.urgent
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
-              opacity: 0.9
-            }
-          }
-
-          MouseArea {
-            anchors.fill: parent
-            visible: !root.editingLocation
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: root.startEditingLocation()
-          }
-
-          // Editing state, mirroring the stock weather widget's picker.
-          Row {
-            visible: root.editingLocation
-            anchors.left: parent.left
-            anchors.leftMargin: Style.space(12)
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.space(6)
-
-            TextField {
-              id: locationField
-              width: Style.space(220)
-              enabled: !root.savingLocation
-              placeholderText: "Search city"
-              foreground: root.bar ? root.bar.foreground : Color.foreground
-              font.family: Style.font.family
-
-              onTextChanged: if (root.editingLocation && !root.savingLocation) geocodeDebounce.restart()
-
-              Keys.onPressed: function(event) {
-                if (event.key === Qt.Key_Escape) {
-                  root.cancelEditingLocation()
-                  event.accepted = true
-                } else if (event.key === Qt.Key_Down) {
-                  if (root.suggestionIndex < root.locationSuggestions.length - 1) root.suggestionIndex++
-                  event.accepted = true
-                } else if (event.key === Qt.Key_Up) {
-                  if (root.suggestionIndex > 0) root.suggestionIndex--
-                  event.accepted = true
-                } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                  root.commitLocation()
-                  event.accepted = true
-                }
-              }
-            }
-
-            // Clear back to IP auto-detect; becomes a spinner while saving.
-            Rectangle {
-              width: Style.space(18)
-              height: Style.space(18)
-              anchors.verticalCenter: parent.verticalCenter
-              radius: Math.min(4, Style.cornerRadius)
-              color: !root.savingLocation && clearLocationArea.containsMouse
-                ? Style.hoverFillFor(root.bar ? root.bar.foreground : Color.foreground, Color.accent)
-                : "transparent"
-
-              Text {
-                anchors.centerIn: parent
-                text: root.savingLocation ? "󰦖" : "✕"
-                font.family: Style.font.family
-                color: Qt.darker(root.bar ? root.bar.foreground : Color.foreground, 1.4)
-                font.pixelSize: Style.font.bodySmall
-
-                RotationAnimator on rotation {
-                  running: root.savingLocation
-                  from: 0
-                  to: 360
-                  duration: 800
-                  loops: Animation.Infinite
-                }
-              }
-
-              MouseArea {
-                id: clearLocationArea
-                anchors.fill: parent
-                hoverEnabled: true
-                enabled: !root.savingLocation
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.clearLocation()
-              }
-            }
-          }
+        // Separator, then a small-caps heading at the content edge, then the
+        // rows inset under it. That rail is the shape every dense first-party
+        // panel is built on — audio, network, power, bluetooth — and without
+        // it a panel reads as a stack of controls rather than as one of theirs.
+        PanelSectionHeader {
+          text: "LOCATION"
+          foreground: root.bar ? root.bar.foreground : Color.foreground
+          fontFamily: Style.font.family
         }
 
-        // ---- Geocoding suggestions ---------------------------------------------
-        Column {
+        LocationPicker {
+          id: locationPicker
           width: parent.width
-          spacing: 0
-          visible: root.editingLocation && !root.savingLocation && root.locationSuggestions.length > 0
+          spacing: Style.space(6)
+          bar: root.bar
+          locationName: root.locationName
+          locationState: root.locationState
+          coverageMissing: root.coverageMissing
+          editing: root.editingLocation
+          saving: root.savingLocation
+          suggestions: root.locationSuggestions
+          suggestionIndex: root.suggestionIndex
 
-          Repeater {
-            model: root.locationSuggestions
-
-            Rectangle {
-              required property var modelData
-              required property int index
-
-              width: parent.width
-              height: suggestionRow.implicitHeight + Style.space(12)
-              radius: Style.cornerRadius
-              color: index === root.suggestionIndex
-                ? Style.hoverFillFor(root.bar ? root.bar.foreground : Color.foreground, Color.accent)
-                : "transparent"
-
-              Row {
-                id: suggestionRow
-                anchors.left: parent.left
-                anchors.leftMargin: Style.space(16)
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: Style.space(8)
-
-                Text {
-                  text: modelData.name
-                  color: index === root.suggestionIndex
-                    ? Style.hoverStateColor(root.bar ? root.bar.foreground : Color.foreground, Color.accent)
-                    : (root.bar ? root.bar.foreground : Color.foreground)
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.body
-                }
-
-                Text {
-                  visible: text !== ""
-                  text: modelData.description
-                  color: Qt.darker(root.bar ? root.bar.foreground : Color.foreground, 1.5)
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.bodySmall
-                  anchors.verticalCenter: parent.verticalCenter
-                }
-              }
-
-              MouseArea {
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onPositionChanged: root.suggestionIndex = index
-                onClicked: root.pickSuggestion(modelData)
-              }
-            }
-          }
+          onEditRequested: root.startEditingLocation()
+          onCancelRequested: root.cancelEditingLocation()
+          onCommitRequested: root.commitLocation()
+          onClearRequested: root.clearLocation()
+          onQueryEdited: geocodeDebounce.restart()
+          onSuggestionHighlighted: function(index) { root.suggestionIndex = index }
+          onSuggestionPicked: function(suggestion) { root.pickSuggestion(suggestion) }
         }
 
         PanelSeparator { width: parent.width }
 
-        // ---- Alerts ------------------------------------------------------------
-        Item {
+        AlertControls {
           width: parent.width
-          height: Style.spacing.controlHeight
+          // Sections need more air between them than rows do inside one.
+          spacing: Style.space(12)
+          bar: root.bar
+          radar: root.radar
+          alertsEnabled: root.alertsEnabled
+          locationState: root.locationState
+          alertLeadMinutes: root.alertLeadMinutes
+          alertRadiusKm: root.alertRadiusKm
+          radiusPresets: root.radiusPresets
+          alertThreshold: root.alertThreshold
+          thresholdOptions: root.thresholdOptions
 
-          Column {
-            anchors.left: parent.left
-            anchors.leftMargin: Style.space(12)
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: 1
-
-            Text {
-              text: "Storm alerts"
-              color: root.bar ? root.bar.foreground : Color.foreground
-              font.family: Style.font.family
-              font.pixelSize: Style.font.body
-            }
-
-            Text {
-              // Proof the switch is doing something, rather than a silent
-              // toggle the user has to take on faith.
-              text: {
-                if (!root.alertsEnabled) return "off"
-                if (!root.hasLocation) return "no location set"
-                if (root.radar && root.radar.checking) return "checking…"
-                if (root.radar && root.radar.lastCheckTime > 0) {
-                  if (root.radar.outlookLevel === 0) return "nothing expected"
-                  var outlook = root.radar.outlookLabel.toLowerCase() + " expected"
-                  return root.radar.outlookAtClock !== ""
-                    ? outlook + " around " + root.radar.outlookAtClock
-                    : outlook
-                }
-                return "starting…"
-              }
-              color: root.bar ? root.bar.foreground : Color.foreground
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
-              opacity: 0.55
-            }
+          onAlertsToggled: {
+            var next = !root.alertsEnabled
+            root.persistSetting("alertsEnabled", next)
+            // Fire the first check immediately so enabling produces a visible
+            // result instead of up to ten minutes of silence.
+            if (next && root.radar && root.radar.checkNow) Qt.callLater(root.radar.checkNow)
           }
-
-          ToggleSwitch {
-            anchors.right: parent.right
-            anchors.rightMargin: Style.space(12)
-            anchors.verticalCenter: parent.verticalCenter
-            checked: root.alertsEnabled
-            busy: root.alertsEnabled && root.radar ? root.radar.checking : false
-            foreground: root.bar ? root.bar.foreground : Color.foreground
-            onToggled: {
-              var next = !root.alertsEnabled
-              root.persistSetting("alertsEnabled", next)
-              // Fire the first check immediately so enabling produces a
-              // visible result instead of up to ten minutes of silence.
-              if (next && root.radar && root.radar.checkNow) Qt.callLater(root.radar.checkNow)
-            }
-          }
-        }
-
-        // ---- Alert radius ------------------------------------------------------
-        // Only while alerts are on: with them off there is nothing to tune, and
-        // the rings it controls are not drawn either.
-        Item {
-          width: parent.width
-          height: Style.spacing.controlHeight
-          visible: root.alertsEnabled
-
-          Column {
-            anchors.left: parent.left
-            anchors.leftMargin: Style.space(12)
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: 1
-
-            Text {
-              text: "Alert radius (km)"
-              color: root.bar ? root.bar.foreground : Color.foreground
-              font.family: Style.font.family
-              font.pixelSize: Style.font.body
-            }
-
-            // The kilometres are what the rings show; the hours are what the
-            // number actually means. Saying both keeps the control honest
-            // about being an approximation.
-            Text {
-              text: "about " + root.humanizeLead(root.alertLeadMinutes) + " of warning"
-              color: root.bar ? root.bar.foreground : Color.foreground
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
-              opacity: 0.55
-            }
-          }
-
-          ButtonGroup {
-            anchors.right: parent.right
-            anchors.rightMargin: Style.space(12)
-            anchors.verticalCenter: parent.verticalCenter
-            options: root.radiusPresets
-            value: String(root.alertRadiusKm)
-            foreground: root.bar ? root.bar.foreground : Color.foreground
-            background: root.bar ? root.bar.background : Color.background
-            onChanged: function(value) {
-              var km = parseInt(value, 10)
-              if (!isFinite(km) || km === root.alertRadiusKm) return
-              // The service watches for this and re-checks on its own, so that
-              // changing the radius from the settings form behaves the same as
-              // changing it here.
-              root.persistSetting("alertRadiusKm", km)
-            }
-          }
-        }
-
-        // ---- Alert threshold ---------------------------------------------------
-        // The radius decides how far ahead to look; this decides how bad it has
-        // to be to be worth interrupting for. Without it, a two-hour window in
-        // a wet season would fire on every passing shower, and the plugin would
-        // be switched off — taking the alert that mattered with it.
-        Item {
-          width: parent.width
-          height: Style.spacing.controlHeight
-          visible: root.alertsEnabled
-
-          Column {
-            anchors.left: parent.left
-            anchors.leftMargin: Style.space(12)
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: 1
-
-            Text {
-              text: "Notify me about"
-              color: root.bar ? root.bar.foreground : Color.foreground
-              font.family: Style.font.family
-              font.pixelSize: Style.font.body
-            }
-
-            Text {
-              text: root.thresholdCaption(root.alertThreshold)
-              color: root.bar ? root.bar.foreground : Color.foreground
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
-              opacity: 0.55
-            }
-          }
-
-          ButtonGroup {
-            anchors.right: parent.right
-            anchors.rightMargin: Style.space(12)
-            anchors.verticalCenter: parent.verticalCenter
-            options: root.thresholdOptions
-            value: root.alertThreshold
-            foreground: root.bar ? root.bar.foreground : Color.foreground
-            background: root.bar ? root.bar.background : Color.background
-            onChanged: function(value) {
-              if (value === root.alertThreshold) return
-              root.persistSetting("alertMinIntensity", value)
-            }
-          }
+          // The service watches for these and re-checks on its own, so a
+          // value edited into shell.json by hand behaves the same as one
+          // chosen here.
+          onRadiusChosen: function(km) { root.persistSetting("alertRadiusKm", km) }
+          onThresholdChosen: function(name) { root.persistSetting("alertMinIntensity", name) }
         }
       }
     }
