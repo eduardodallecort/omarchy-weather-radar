@@ -466,13 +466,14 @@ rather than turning up in a review.
 notification body is made inert first. Both are claims about source, which is
 why `test/text-format.sh` below renders them and measures what Qt actually does.
 
-Two more run the QML itself, under Quickshell rather than in Node. Both skip
+The rest run the QML itself, under Quickshell rather than in Node. All skip
 where there is no `qs`, and `RADAR_REQUIRE_QS=1` turns that skip into a failure,
 which is what CI sets:
 
 ```bash
-./test/first-run.sh     # a machine that has never set a weather location
-./test/text-format.sh   # a place name cannot make the shell fetch a URL
+./test/first-run.sh      # a machine that has never set a weather location
+./test/basemap-steps.sh  # decoding the ground never stalls the shell
+./test/text-format.sh    # a place name cannot make the shell fetch a URL
 ```
 
 The first loads the real `Service.qml` against a home directory that does not
@@ -484,7 +485,11 @@ the first location ever written is invisible to the watch meant to notice it.
 What closes the gap is the panel calling `reloadLocation()` after a save, and
 nothing but this notices if that call is removed.
 
-The second renders hostile strings under Qt and watches a socket. QML's `Text`
+`test/basemap-steps.sh` watches the thread that draws the shell while the
+real service decodes the ground, and fails on a stall: the decode runs in steps
+of a few milliseconds, one per frame, and this is what keeps it that way.
+
+`test/text-format.sh` renders hostile strings under Qt and watches a socket. QML's `Text`
 defaults to `Text.AutoText`, which decides per string whether it is markup, so a
 place name shaped like an `<img>` tag is fetched over the network by the process
 that owns the bar, the panels and the lock screen. Every `Text` here declares

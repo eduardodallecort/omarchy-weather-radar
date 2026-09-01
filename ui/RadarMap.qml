@@ -16,8 +16,9 @@ Item {
 
   property var bar: null
 
-  // The decoded ground layer, owned by the service. Null until it has loaded,
-  // which leaves the map as open sea for a moment rather than as nothing.
+  // The decoded ground, owned by the service. Null until its first layer has
+  // been decoded, then filled in layer by layer over a second or so — the
+  // map is open sea for a moment, then land, then what sits on it.
   property var basemap: null
 
   // Where the map is looking.

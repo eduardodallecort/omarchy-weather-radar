@@ -304,10 +304,21 @@ Item {
   // withdrawn, and works with no network at all.
   // Also read whole. It is this plugin's own file, inside its own directory:
   // anything able to replace it can replace Service.qml beside it, so a
-  // ceiling here would guard nothing. Corruption is handled instead — decode()
-  // answers null on anything it cannot read, including a truncated file.
+  // ceiling here would guard nothing. Corruption is handled instead — the
+  // decoder answers null on anything it cannot read, including a truncated
+  // file.
+  //
+  // Decoding is spread over many short steps rather than done in one call,
+  // because this is the thread that draws the bar, every panel and the lock
+  // screen, and one call holds it for over half a second on a fast machine
+  // and for seconds on a slow one. Each layer is published as it completes,
+  // so the ground arrives in the order the file stores it — land first, then
+  // what sits on land — over a second or so during which the radar is already
+  // drawn over open sea. `basemap` holds the layers finished so far until the
+  // last one lands, and is null again if the file turns out to be unreadable.
   property var basemap: null
   property bool basemapFailed: false
+  property var basemapDecoder: null
 
   function loadBasemap() {
     if (basemap || basemapFile.path !== "") return
@@ -318,15 +329,46 @@ Item {
     id: basemapFile
     path: ""
     onLoaded: {
-      root.basemap = Basemap.decode(basemapFile.data())
-      // decode() answers null on anything it cannot read rather than throwing,
-      // so a corrupt or truncated file costs the ground layer and nothing else.
-      root.basemapFailed = root.basemap === null
-      if (root.basemapFailed) console.warn("weather-radar: data/basemap.bin could not be decoded")
+      root.basemapDecoder = Basemap.beginDecode(basemapFile.data())
+      if (root.basemapDecoder === null) root.basemapUnreadable("could not be decoded")
     }
-    onLoadFailed: {
-      root.basemapFailed = true
-      console.warn("weather-radar: data/basemap.bin could not be read")
+    onLoadFailed: root.basemapUnreadable("could not be read")
+  }
+
+  function basemapUnreadable(why) {
+    root.basemapDecoder = null
+    root.basemap = null
+    root.basemapFailed = true
+    console.warn("weather-radar: data/basemap.bin " + why)
+  }
+
+  // One step per frame, for as long as there is a decoder. A QML Timer is
+  // driven by the animation clock, not the event loop: an interval of zero
+  // never fires at all, and one of a millisecond fires once per tick of that
+  // clock, which is once per frame. So a step runs, the frame is drawn, and
+  // input and the IPC the shell answers on this thread get their turn between
+  // the two.
+  Timer {
+    id: basemapStepper
+    interval: 1
+    repeat: true
+    running: root.basemapDecoder !== null
+    onTriggered: {
+      var decoder = root.basemapDecoder
+      var layersBefore = decoder.order.length
+      var finished = decoder.step(Basemap.DECODE_STEP_MS)
+
+      if (finished) {
+        if (decoder.result === null) {
+          root.basemapUnreadable("could not be decoded")
+          return
+        }
+        root.basemap = decoder.result
+        root.basemapFailed = false
+        root.basemapDecoder = null
+      } else if (decoder.order.length !== layersBefore) {
+        root.basemap = decoder.partial()
+      }
     }
   }
 

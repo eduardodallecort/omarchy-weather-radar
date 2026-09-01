@@ -18,6 +18,30 @@ committed. Sources are cached in tools/.cache, which is not.
     python3 tools/build-basemap.py
 
 Natural Earth is public domain. Credit is given in the panel anyway.
+
+Format
+------
+
+Everything is little more than LEB128 varints. Coordinates are quantised to
+integers (see QUANTUM) and stored as zigzag deltas from the previous point of
+the same ring. Strings are a byte length followed by UTF-8.
+
+    magic       "OWRB"
+    version     u8, FORMAT_VERSION
+    quantum     varint
+    layers      varint, then that many layers:
+
+    layer       name string, kind u8, min zoom u8, max zoom u8, feature count varint
+      geometry  ring total varint, point total varint, then per feature:
+                  ring count varint, then per ring:
+                    point count varint, then per point: delta x signed, delta y signed
+      places    per place: delta x signed, delta y signed, min zoom u8, name string
+
+The ring and point totals let the decoder allocate every array once and read
+the layer in a single pass; the alternative is a counting pass over the same
+bytes, which under the QML engine cost a third of the decode. They are checked
+against the bytes that follow — a header that does not match its layer is a
+corrupt file, not a hint.
 """
 
 import json
@@ -35,7 +59,7 @@ OUTPUT = os.path.join(ROOT, "data", "basemap.bin")
 SOURCE = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson"
 
 MAGIC = b"OWRB"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 
 # Coordinates are stored as integers in units of 1/1000 of a degree — 111 m of
 # latitude, and less of longitude away from the equator. At the deepest zoom
@@ -235,6 +259,8 @@ def build_geometry_layer(name, source, kind, tolerance, zooms):
     body += string(name)
     body += bytes([kind, zooms[0], zooms[1]])
     body += varint(len(features))
+    body += varint(sum(len(rings) for rings in features))
+    body += varint(sum(len(ring) for rings in features for ring in rings))
     for rings in features:
         body += encode_rings(rings)
 
