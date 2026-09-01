@@ -367,6 +367,42 @@ test("the shipped basemap decodes", () => {
   assert.strictEqual(shipped.quantum, QUANTUM)
 })
 
+test("every hole in the shipped basemap is wound against the ring it sits in", () => {
+  // The renderer fills with the nonzero winding rule, which is what QtQuick's
+  // Context2D does whatever argument fill() is handed. Under that rule a hole
+  // subtracts only if it runs opposite the exterior around it. Nothing at
+  // render time can tell the difference — a same-wound hole is painted as
+  // land, and a lake quietly becomes an island.
+  const area = (layer, r) => {
+    let a = 0
+    for (let p = layer.ringStart[r]; p < layer.ringStart[r + 1]; p++) {
+      const q = p + 1 < layer.ringStart[r + 1] ? p + 1 : layer.ringStart[r]
+      a += layer.coordinates[p * 2] * layer.coordinates[q * 2 + 1]
+         - layer.coordinates[q * 2] * layer.coordinates[p * 2 + 1]
+    }
+    return a / 2
+  }
+
+  let holes = 0
+  for (const name of ["land", "land-lo", "lakes", "urban"]) {
+    const layer = shipped.layers[name]
+    for (let f = 0; f < layer.featureCount; f++) {
+      const first = layer.featureRing[f]
+      const outer = area(layer, first)
+      if (outer === 0) continue
+      for (let r = first + 1; r < layer.featureRing[f + 1]; r++) {
+        const inner = area(layer, r)
+        // A ring larger than the first is another exterior, not a hole.
+        if (inner === 0 || Math.abs(inner) > Math.abs(outer)) continue
+        holes++
+        assert.notStrictEqual(Math.sign(inner), Math.sign(outer),
+          `${name} feature ${f} ring ${r} is wound the same way as its exterior`)
+      }
+    }
+  }
+  assert.ok(holes > 400, `expected the basemap to carry holes at all, found ${holes}`)
+})
+
 test("the shipped basemap carries every layer the renderer draws", () => {
   // The renderer names these; a rebuild that dropped one would leave the map
   // quietly missing its coastlines.

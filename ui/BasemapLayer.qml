@@ -86,11 +86,18 @@ Canvas {
 
   // Filled layers are drawn one feature at a time.
   //
-  // The even-odd rule is what cuts a lake out of the island it sits in, and it
-  // has to be scoped to the feature that owns the hole. Applied across a path
-  // holding a whole layer, any two features that overlap cancel each other and
-  // leave a gap showing whatever is underneath — a patch of sea over land that
-  // appears and disappears as panning changes which features are in the path.
+  // What cuts a lake out of the island it sits in is winding: the rule is
+  // nonzero, and every interior ring in data/basemap.bin runs opposite the
+  // exterior around it, so the lake subtracts. That is the whole mechanism, so
+  // test/basemap.test.js holds it — a rebuild that emitted a hole wound the
+  // same way as its exterior would paint the lake as land, and nothing on this
+  // side would report it.
+  //
+  // It has to be scoped to the feature that owns the hole. In a path holding a
+  // whole layer, one feature's hole ring lands over another feature's interior
+  // and cancels it, leaving a gap showing whatever is underneath — a patch of
+  // sea over land that appears and disappears as panning changes which features
+  // are in the path.
   function fillLayer(ctx, layer, view, window, offsets, fill, stroke, lineWidth) {
     for (var o = 0; o < offsets.length; o++) {
       var copyWindow = Basemap.shiftWindow(window, offsets[o])
@@ -100,7 +107,7 @@ Canvas {
         ctx.beginPath()
         tracePaths(ctx, layer, indices[i], copyView, false)
         ctx.fillStyle = fill
-        ctx.fill("evenodd")
+        ctx.fill()
         if (stroke !== undefined) {
           // A shape cut open to be drawn on a cylinder has to be traced twice:
           // the fill needs the ring closed, the coastline must leave out the
@@ -136,6 +143,15 @@ Canvas {
   onPaint: {
     var ctx = getContext("2d")
     ctx.reset()
+
+    // Chosen rather than inherited. QtQuick's Context2D.fill() takes no
+    // argument — `fill("evenodd")` reads like a rule and is discarded — so the
+    // rule is whatever `fillRule` holds, and reset() leaves that at
+    // Qt.WindingFill. Measured under Qt 6: two nested squares wound the same
+    // way fill solid through the argument form, and cut a hole only through
+    // this property. Naming it is what stops the renderer and the data from
+    // disagreeing without saying so.
+    ctx.fillRule = Qt.WindingFill
 
     ctx.fillStyle = seaColor
     ctx.fillRect(0, 0, width, height)
