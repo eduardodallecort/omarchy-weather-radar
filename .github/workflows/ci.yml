@@ -76,6 +76,16 @@ jobs:
       # Text.PlainText and that the notification body makes the place name
       # inert. That is source inspection. This renders those strings under Qt
       # and watches a socket, so the claim rests on what Qt does.
+      # A response is only an answer to the question that was asked. This one
+      # changes the city while a forecast request is in flight and reads the
+      # toast that comes out.
+      - name: A forecast answers the question that was asked
+        env:
+          QT_QPA_PLATFORM: offscreen
+          XDG_RUNTIME_DIR: /tmp/runtime
+          RADAR_REQUIRE_QS: "1"
+        run: ./test/stale-forecast.sh
+
       - name: A place name cannot make the shell fetch a URL
         env:
           QT_QPA_PLATFORM: offscreen

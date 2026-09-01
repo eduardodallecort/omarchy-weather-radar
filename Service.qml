@@ -421,6 +421,21 @@ Item {
     checkNow()
   }
 
+  // What the request in flight was asked about: where, under what name, and
+  // over how wide a window. A response is only an answer to the question that
+  // was asked, and both halves of the question can move while curl is running.
+  //
+  // Nothing else closes that gap. checkNow() refuses to start a second request
+  // while one is out, so the handlers that react to a change — onLocationChanged
+  // and syncAlertConfig — call it and are turned away, and the change is left
+  // with nothing running for it. Comparing here is what notices, and what asks
+  // again.
+  property string requestedFor: ""
+
+  function forecastRequestKey(lat, lon) {
+    return lat + "," + lon + "|" + locationName + "|" + forecastSlots
+  }
+
   function checkNow() {
     if (!hasLocation || checking) return
 
@@ -438,6 +453,7 @@ Item {
     if (!isFinite(lat) || !isFinite(lon)) return
 
     checking = true
+    requestedFor = forecastRequestKey(lat, lon)
 
     // Five coordinates rather than one: the centre and four points 5 km out.
     // See RadarModel.samplePoints — the model grid is coarse enough that a
@@ -501,6 +517,22 @@ Item {
   function applyForecastResponse(exitCode, text) {
     checking = false
     lastAnswerTime = Date.now()
+
+    // Answered a question nobody is asking any more. Applying it would report
+    // one place's forecast under another place's name — the body ends with
+    // whatever `locationName` holds now, not with the city the request went out
+    // for — or would summarise the old window with the new one's slot count.
+    // Neither the failure count nor the outlook learns anything from it; what
+    // it earns is the request the change never got to make.
+    var lat = parseFloat(location.latitude)
+    var lon = parseFloat(location.longitude)
+    if (requestedFor !== "" && (!isFinite(lat) || !isFinite(lon)
+        || forecastRequestKey(lat, lon) !== requestedFor)) {
+      requestedFor = ""
+      checkNow()
+      return
+    }
+    requestedFor = ""
 
     if (exitCode !== 0) {
       consecutiveFailures++
