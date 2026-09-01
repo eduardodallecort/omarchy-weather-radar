@@ -72,6 +72,17 @@ jobs:
           mkdir -p /tmp/runtime
           ./test/first-run.sh
 
+      # The ground is decoded on the thread that draws the shell, in steps. This
+      # watches that thread while the real service decodes the shipped file,
+      # and fails on a stall — which is what a decoder reverted to one call
+      # would produce, at half a second on a laptop and more here.
+      - name: Decoding the ground never stalls the shell
+        env:
+          QT_QPA_PLATFORM: offscreen
+          XDG_RUNTIME_DIR: /tmp/runtime
+          RADAR_REQUIRE_QS: "1"
+        run: ./test/basemap-steps.sh
+
       # test/qml-source.test.js establishes that every Text declares
       # Text.PlainText and that the notification body makes the place name
       # inert. That is source inspection. This renders those strings under Qt

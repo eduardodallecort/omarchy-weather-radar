@@ -44,7 +44,7 @@ function encode(layers, options) {
   for (const character of settings.magic === undefined ? "OWRB" : settings.magic) {
     out.push(character.charCodeAt(0))
   }
-  out.push(settings.version === undefined ? 1 : settings.version)
+  out.push(settings.version === undefined ? 2 : settings.version)
   varint(settings.quantum === undefined ? QUANTUM : settings.quantum, out)
   varint(layers.length, out)
 
@@ -67,6 +67,14 @@ function encode(layers, options) {
     }
 
     varint(layer.features.length, out)
+    // The totals the decoder sizes its arrays from. A test can misstate them
+    // on purpose, to check that the decoder does not take them on trust.
+    const totals = settings.totals || {}
+    const ringTotal = layer.features.reduce((n, rings) => n + rings.length, 0)
+    const pointTotal = layer.features.reduce(
+      (n, rings) => n + rings.reduce((m, ring) => m + ring.length, 0), 0)
+    varint(ringTotal + (totals.rings || 0), out)
+    varint(pointTotal + (totals.points || 0), out)
     for (const rings of layer.features) {
       varint(rings.length, out)
       for (const ring of rings) {
@@ -748,4 +756,320 @@ test("only the shapes cut open by the projection are traced twice", () => {
   assert.strictEqual(Basemap.featureTouchesDomainEdge(null, 0), false)
   assert.strictEqual(Basemap.featureTouchesDomainEdge(land, -1), false)
   assert.strictEqual(Basemap.featureTouchesDomainEdge(land, land.featureCount), false)
+})
+
+// ---------------------------------------------------------------------------
+// Decoding in steps
+// ---------------------------------------------------------------------------
+
+// A layer large enough to take several steps at a budget of nothing: one ring
+// of many points, then rings of a few, then places. Points move by more than
+// a varint's worth so the deltas exercise the signed path both ways.
+function stepFixture() {
+  const long = []
+  for (let i = 0; i < 3000; i++) long.push([i * 37 - 50000, Math.round(Math.sin(i / 7) * 20000)])
+  long.push(long[0])
+  const small = [[[0, 0], [500, 0], [500, 500], [0, 0]]]
+  const river = []
+  for (let i = 0; i < 1500; i++) river.push([i * 41, i * 13 - 9000])
+  return [
+    { name: "coast", kind: 1, minZoom: 3, maxZoom: 9, features: [[long], small, small] },
+    { name: "lines", kind: 0, minZoom: 3, maxZoom: 9, features: [[river], [[[0, 0], [1000, 1000]]]] },
+    { name: "places", kind: 2, minZoom: 3, maxZoom: 9,
+      places: [{ x: 1, y: 2, minZoom: 3, name: "Å" }, { x: -5, y: 9, minZoom: 4, name: "B" }] }
+  ]
+}
+
+// Runs a decoder to the end at a budget of zero, which makes every step the
+// smallest the decoder allows. The cap is a safety net: a decoder that could
+// stop without progressing would otherwise hang the test.
+function stepToEnd(decoder) {
+  let steps = 0
+  while (!decoder.step(0)) {
+    steps++
+    assert.ok(steps < 100000, "the decoder is not making progress")
+  }
+  return steps
+}
+
+test("decoding in steps yields the same basemap as decoding at once", () => {
+  const whole = Basemap.decode(encode(stepFixture()))
+  const decoder = Basemap.beginDecode(encode(stepFixture()))
+  const steps = stepToEnd(decoder)
+  assert.ok(steps >= 5, `expected several steps for 3,000 points, got ${steps}`)
+  assert.deepStrictEqual(decoder.result, whole)
+})
+
+test("the shipped basemap decodes the same in steps as at once", () => {
+  const file = readFileSync(join(__dirname, "..", "data", "basemap.bin"))
+  const decoder = Basemap.beginDecode(file.buffer.slice(file.byteOffset, file.byteOffset + file.byteLength))
+  const steps = stepToEnd(decoder)
+  assert.ok(steps > 1000, `a million points should take many steps, took ${steps}`)
+  assert.deepStrictEqual(decoder.result, shipped)
+})
+
+test("a step with no budget still makes progress", () => {
+  // The clock is looked at every so many points, and a budget of zero has
+  // expired before the first look. A decoder that let the first look stop it
+  // would return without reading a byte, forever.
+  const decoder = Basemap.beginDecode(encode(stepFixture()))
+  const before = decoder.reader.at
+  assert.strictEqual(decoder.step(0), false)
+  assert.ok(decoder.reader.at > before, "nothing was read")
+})
+
+test("a stepped decoder is finished for good once it has answered", () => {
+  const decoder = Basemap.beginDecode(encode(stepFixture()))
+  stepToEnd(decoder)
+  assert.notStrictEqual(decoder.result, null)
+  assert.strictEqual(decoder.step(0), true)
+  assert.strictEqual(decoder.step(Infinity), true)
+})
+
+test("layers are published as they complete, in file order", () => {
+  const decoder = Basemap.beginDecode(encode(stepFixture()))
+  const published = []
+  let last = null
+  while (!decoder.step(0)) {
+    const partial = decoder.partial()
+    assert.notStrictEqual(partial, last, "each publication is a new object, so a binding notices it")
+    if (last === null || partial.order.length !== last.order.length) published.push(partial)
+    last = partial
+  }
+  const final = decoder.result.order
+  assert.deepStrictEqual(final, ["coast", "lines", "places"])
+  for (const partial of published) {
+    assert.deepStrictEqual(partial.order, final.slice(0, partial.order.length),
+      "what is published is the finished layers, in file order, and never one still being read")
+  }
+  assert.ok(published.some(p => p.order.length === 1 && p.order[0] === "coast"),
+    "the first layer is published while the second is still being read")
+
+  for (const partial of published) {
+    for (const name of partial.order) {
+      assert.strictEqual(partial.layers[name], decoder.result.layers[name],
+        `${name} as published is the very object the finished basemap holds`)
+    }
+    assert.strictEqual(partial.quantum, decoder.result.quantum)
+  }
+})
+
+test("a truncated file fails wherever the cut falls, without an exception", () => {
+  const full = new Uint8Array(encode(stepFixture()))
+  for (const fraction of [0.1, 0.3, 0.6, 0.95, 0.999]) {
+    const cut = full.slice(0, Math.floor(full.length * fraction))
+    const decoder = Basemap.beginDecode(cut.buffer)
+    if (decoder === null) continue
+    stepToEnd(decoder)
+    assert.strictEqual(decoder.result, null, `truncated to ${fraction}`)
+  }
+})
+
+test("a layer whose header does not match its bytes is refused", () => {
+  // The totals size the arrays. Claiming more than the file could hold is
+  // refused before anything is allocated; claiming other than the layer then
+  // turns out to contain is refused too, in either direction.
+  assert.strictEqual(Basemap.decode(encode(SIMPLE, { totals: { points: 100000000 } })), null,
+    "more points than there are bytes")
+  assert.strictEqual(Basemap.decode(encode(SIMPLE, { totals: { rings: 100000000 } })), null,
+    "more rings than there are bytes")
+  assert.strictEqual(Basemap.decode(encode(SIMPLE, { totals: { points: 1 } })), null,
+    "one point more than the layer holds")
+  assert.strictEqual(Basemap.decode(encode(SIMPLE, { totals: { points: -1 } })), null,
+    "one point fewer than the layer holds")
+  assert.strictEqual(Basemap.decode(encode(SIMPLE, { totals: { rings: -1 } })), null,
+    "one ring fewer than the layer holds")
+})
+
+test("the format that shipped before this one is refused, not misread", () => {
+  // Version 1 had no totals in the layer header. Read as version 2, its first
+  // feature's ring count would be taken for a total; refusing by version is
+  // what keeps a stale file from decoding into something.
+  assert.strictEqual(Basemap.decode(encode(SIMPLE, { version: 1 })), null)
+})
+
+// ---------------------------------------------------------------------------
+// Runs of a ring
+// ---------------------------------------------------------------------------
+
+// Every point of a run inside that run's bounds, every run inside its ring,
+// and the runs of a feature adding up to the feature's own box.
+function checkRuns(layer) {
+  const CHUNK = Basemap.CHUNK
+  for (let f = 0; f < layer.featureCount; f++) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (let r = layer.featureRing[f]; r < layer.featureRing[f + 1]; r++) {
+      const from = layer.ringStart[r], to = layer.ringStart[r + 1]
+      const runs = layer.ringChunk[r + 1] - layer.ringChunk[r]
+      assert.strictEqual(runs, Math.ceil((to - from) / CHUNK), `ring ${r} has the wrong number of runs`)
+      for (let c = layer.ringChunk[r]; c < layer.ringChunk[r + 1]; c++) {
+        const start = from + (c - layer.ringChunk[r]) * CHUNK
+        const end = Math.min(start + CHUNK, to)
+        const b = layer.chunkBounds.subarray(c * 4, c * 4 + 4)
+        let seenMinX = Infinity, seenMinY = Infinity, seenMaxX = -Infinity, seenMaxY = -Infinity
+        for (let p = start; p < end; p++) {
+          const x = layer.coordinates[p * 2], y = layer.coordinates[p * 2 + 1]
+          seenMinX = Math.min(seenMinX, x); seenMaxX = Math.max(seenMaxX, x)
+          seenMinY = Math.min(seenMinY, y); seenMaxY = Math.max(seenMaxY, y)
+        }
+        assert.deepStrictEqual(Array.from(b), [seenMinX, seenMinY, seenMaxX, seenMaxY],
+          `run ${c} of ring ${r} has bounds other than its points'`)
+        minX = Math.min(minX, b[0]); minY = Math.min(minY, b[1])
+        maxX = Math.max(maxX, b[2]); maxY = Math.max(maxY, b[3])
+      }
+    }
+    if (layer.featureRing[f + 1] > layer.featureRing[f]) {
+      assert.deepStrictEqual(Array.from(layer.bounds.subarray(f * 4, f * 4 + 4)),
+        [minX, minY, maxX, maxY], `feature ${f}'s box is not the union of its runs`)
+    }
+  }
+  assert.strictEqual(layer.chunkBounds.length, layer.chunkCount * 4)
+  assert.strictEqual(layer.ringChunk[layer.ringChunk.length - 1], layer.chunkCount)
+}
+
+test("every run of a ring carries the bounds of exactly its points", () => {
+  checkRuns(Basemap.decode(encode(stepFixture())).layers.coast)
+  checkRuns(Basemap.decode(encode(SIMPLE)).layers.land)
+  for (const name of shipped.order) {
+    if (shipped.layers[name].kind !== 2) checkRuns(shipped.layers[name])
+  }
+})
+
+test("a view of open Pacific walks almost none of the Americas", () => {
+  // The land polygon with the most points is a continent, and its box reaches
+  // the ocean either side of it. What a view inside that box costs is the
+  // runs that are not wholly beyond one of its edges.
+  const land = shipped.layers["land"]
+  const where = view(7, -10, -150)
+  const found = Basemap.featuresInBounds(land, Basemap.viewBounds(where))
+  let largest = -1, most = 0
+  for (const f of found) {
+    const points = land.ringStart[land.featureRing[f + 1]] - land.ringStart[land.featureRing[f]]
+    if (points > most) { most = points; largest = f }
+  }
+  assert.ok(most > 40000, `the largest polygon the Pacific view meets has ${most} points`)
+
+  const window = Basemap.paintWindow(where, land.quantum, Basemap.PATH_MARGIN)
+  let runs = 0, walked = 0
+  for (let r = land.featureRing[largest]; r < land.featureRing[largest + 1]; r++) {
+    for (let c = land.ringChunk[r]; c < land.ringChunk[r + 1]; c++) {
+      runs++
+      if (!Basemap.runBeyondEdge(land.chunkBounds, c, window)) walked++
+    }
+  }
+  assert.ok(runs > 1000, `${runs} runs`)
+  assert.ok(walked < runs * 0.01, `${walked} of ${runs} runs would be walked`)
+})
+
+test("skipping a run leaves the visible shape as it was", () => {
+  // A square on screen with a long excursion far off its right edge: the
+  // excursion is hundreds of points in runs beyond that edge, and it is part
+  // of the polygon, so what is inside on screen must not change when those
+  // runs are reduced to their ends.
+  const ring = [[-2000, -1000], [2000, -1000], [2000, -500]]
+  for (let lon = 2100; lon <= 30000; lon += 100) ring.push([lon, -500])
+  ring.push([30000, 500])
+  for (let lon = 29900; lon >= 2100; lon -= 100) ring.push([lon, 500])
+  ring.push([2000, 500], [2000, 1000], [-2000, 1000], [-2000, -1000])
+  assert.ok(ring.length > 500)
+
+  const layer = Basemap.decode(encode([
+    { name: "shape", kind: 1, minZoom: 3, maxZoom: 9, features: [[ring]] }
+  ])).layers.shape
+
+  const where = view(7, 0, 0)
+  const paths = Basemap.featurePaths(layer, 0, where)
+  assert.strictEqual(paths.length, 1)
+  const emitted = paths[0]
+  assert.ok(emitted.length / 2 < ring.length / 10,
+    `${emitted.length / 2} points emitted for a ring of ${ring.length}`)
+
+  // The truth: every point of the ring, projected the long way.
+  const truth = []
+  for (const [x, y] of ring) {
+    const at = TileMath.projectToViewport(y / QUANTUM, x / QUANTUM,
+      where.centerLatitude, where.centerLongitude, where.zoom, where.width, where.height)
+    truth.push(at.x, at.y)
+  }
+
+  let inside = 0
+  for (let y = 7; y < where.height; y += 15) {
+    for (let x = 7; x < where.width; x += 15) {
+      const expected = pointInPath(truth, x, y)
+      if (expected) inside++
+      assert.strictEqual(pointInPath(emitted, x, y), expected, `pixel ${x},${y}`)
+    }
+  }
+  assert.ok(inside > 50, "the shape covers part of the canvas")
+})
+
+test("the cut that closes a polygon at the pole is not stroked, run by run", () => {
+  // The same shape as above with the legs along the antimeridian drawn point
+  // by point, so that they span several runs: the cut must land on each of
+  // its points whether the run around it is walked or skipped.
+  const ring = [[179400, -84206]]
+  for (let lat = -84352; lat >= -89999; lat -= 50) ring.push([180000, lat])
+  for (let lat = -89999; lat <= -84352; lat += 50) ring.push([-180000, lat])
+  ring.push([-179400, -84206])
+  for (let lon = -179000; lon <= 179000; lon += 2000) ring.push([lon, -80000])
+  ring.push([179400, -84206])
+
+  const layer = Basemap.decode(encode([
+    { name: "antarctica", kind: 1, minZoom: 3, maxZoom: 9, features: [[ring]] }
+  ])).layers.antarctica
+
+  // Looking straight at the cut, the legs are on screen and walked; looking
+  // away from it, they are beyond an edge and skipped. Neither may stroke
+  // them, and neither may leave a stroke across the map.
+  for (const longitude of [180, 0, 150]) {
+    const where = view(5, TileMath.constrainLatitude(-89.9, 5, 320), longitude)
+    const cutX = TileMath.projectToViewport(-85, 180, where.centerLatitude, longitude, 5, 700, 320).x
+    for (const path of Basemap.featurePaths(layer, 0, where, undefined, true)) {
+      for (let i = 0; i + 3 < path.length; i += 2) {
+        // Both ends on the antimeridian, one above the other: the cut itself.
+        const onCut = Math.abs(path[i] - path[i + 2]) < 1e-6
+          && Math.abs(path[i] - cutX) < 1e-6
+          && Math.abs(path[i + 1] - path[i + 3]) > 1
+        assert.ok(!onCut, `at ${longitude}: the cut is stroked from ${path[i + 1]} to ${path[i + 3]}`)
+        if (longitude === 180) continue  // the fixture's own coast crosses a view centred on it
+        assert.ok(!crossesInterior(path[i], path[i + 1], path[i + 2], path[i + 3], where),
+          `at ${longitude}: a coastline runs across the map`)
+      }
+    }
+  }
+})
+
+test("a view walks only what it can show", () => {
+  // The cost of a frame counted the way the renderer pays it: every point of
+  // a run the view has to walk, two for a run it can skip. A change that made
+  // the walk depend on what touches the view rather than on what it shows
+  // fails here, before it shows up as a map that drags when panned.
+  const walkedPoints = where => {
+    const window = Basemap.viewBounds(where)
+    let walked = 0
+    for (const name of shipped.order) {
+      const layer = shipped.layers[name]
+      if (!Basemap.layerAppliesAt(layer, where.zoom) || layer.kind === 2) continue
+      for (const offset of Basemap.worldOffsets(window)) {
+        const paint = Basemap.paintWindow(Basemap.shiftView(where, offset), layer.quantum, Basemap.PATH_MARGIN)
+        for (const f of Basemap.featuresInBounds(layer, Basemap.shiftWindow(window, offset))) {
+          for (let r = layer.featureRing[f]; r < layer.featureRing[f + 1]; r++) {
+            const from = layer.ringStart[r], to = layer.ringStart[r + 1]
+            for (let c = layer.ringChunk[r]; c < layer.ringChunk[r + 1]; c++) {
+              const start = from + (c - layer.ringChunk[r]) * Basemap.CHUNK
+              const end = Math.min(start + Basemap.CHUNK, to)
+              walked += Basemap.runBeyondEdge(layer.chunkBounds, c, paint) ? 2 : end - start
+            }
+          }
+        }
+      }
+    }
+    return walked
+  }
+  // Open Pacific inside the Americas' box, which once walked 50,000 points;
+  // London, whose ground once walked 74,000.
+  const pacific = walkedPoints(view(7, -10, -150))
+  assert.ok(pacific < 5000, `open Pacific walks ${pacific} points`)
+  const london = walkedPoints(view(7, 51.5, -0.1))
+  assert.ok(london < 20000, `London walks ${london} points`)
 })
