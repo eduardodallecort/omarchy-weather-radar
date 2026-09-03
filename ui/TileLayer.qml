@@ -35,8 +35,16 @@ Item {
   property var tileUrlFor: null
 
   // Bumped by the owner to force a reload when the URL scheme itself changes
-  // (a new frame, a different palette) so bindings re-evaluate.
+  // (a new frame, a different palette) so bindings re-evaluate. It is read by
+  // each tile's source binding rather than by the model below: a new frame
+  // must repoint the tiles, not tear the whole grid down and build it again.
   property int revision: 0
+
+  // Tiles still waiting on the network. Zero means every tile this layer wants
+  // is on screen, which is what lets the owner hold a crossfade back until the
+  // incoming frame is actually there to fade to.
+  property int pendingTiles: 0
+  readonly property bool contentReady: pendingTiles <= 0
 
   property int tileSize: 256
   property bool smooth: true
@@ -52,15 +60,14 @@ Item {
     centerLatitude, centerLongitude, sourceZoom,
     Math.max(1, width / sourceScale), Math.max(1, height / sourceScale))
 
-  // Flattened tile list. Rebuilt whenever the viewport moves; at the zoom
+  // Flattened tile list. Rebuilt whenever the viewport moves — but not when the
+  // frame changes, which only repoints the tiles that are already there. At the zoom
   // levels this plugin uses that is a few dozen entries, so the simple
   // approach beats an incremental one for readability.
   readonly property var tiles: {
     var list = []
     var view = layout
     if (!view || width <= 0 || height <= 0) return list
-    // `revision` is read so the model rebuilds when the frame changes.
-    var unused = revision
     var scale = sourceScale
     for (var y = view.minY; y <= view.maxY; y++) {
       if (!TileMath.isValidTileY(y, sourceZoom)) continue
@@ -87,7 +94,11 @@ Item {
       width: root.tileSize * root.sourceScale
       height: root.tileSize * root.sourceScale
 
-      source: root.tileUrlFor ? root.tileUrlFor(root.sourceZoom, modelData.tileX, modelData.tileY) : ""
+      source: {
+        // Read so a new frame or palette repoints this tile in place.
+        var unused = root.revision
+        return root.tileUrlFor ? root.tileUrlFor(root.sourceZoom, modelData.tileX, modelData.tileY) : ""
+      }
       asynchronous: true
       cache: true
       // The loader is asked for a tile-sized surface rather than whatever the
@@ -106,6 +117,15 @@ Item {
       // image rather than as an error.
       visible: status === Image.Ready
       onStatusChanged: if (status === Image.Error) root.tileFailed()
+
+      // Each tile reports only its own state, adding one to the layer's count
+      // while it is outstanding and taking it away once it settles. Counting
+      // that way survives tiles being created and destroyed under a pan
+      // without the layer ever having to recount them.
+      readonly property bool settled: source == "" || status === Image.Ready || status === Image.Error
+      onSettledChanged: root.pendingTiles += settled ? -1 : 1
+      Component.onCompleted: if (!settled) root.pendingTiles++
+      Component.onDestruction: if (!settled) root.pendingTiles--
     }
   }
 }
