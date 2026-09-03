@@ -548,6 +548,13 @@ Panel {
   function radarTileUrlA(z, x, y) { return root.radarTileUrlForFrame(root.frameA, z, x, y) }
   function radarTileUrlB(z, x, y) { return root.radarTileUrlForFrame(root.frameB, z, x, y) }
 
+  // Where the loop goes next, fetched a step early. Only while it is running:
+  // someone scrubbing by hand has no next frame worth guessing, and someone
+  // sitting on a still frame should not be pulling tiles at all.
+  readonly property int prefetchFrame: playing && frames.length > 1
+    ? Frames.nextIndex(frames, frameIndex) : -1
+  function radarTileUrlPrefetch(z, x, y) { return root.radarTileUrlForFrame(root.prefetchFrame, z, x, y) }
+
   // ---------------------------------------------------------------------------
   // Radar coverage
   // ---------------------------------------------------------------------------
@@ -634,6 +641,8 @@ Panel {
 
           radarTileUrlA: root.radarTileUrlA
           radarTileUrlB: root.radarTileUrlB
+          prefetchFrame: root.prefetchFrame
+          radarTileUrlPrefetch: root.radarTileUrlPrefetch
 
           frameA: root.frameA
           frameB: root.frameB
