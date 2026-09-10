@@ -164,7 +164,12 @@ Item {
       // carries across the move, and someone who changes city during weather
       // is told nothing because they were already told about somewhere else.
       notifiedLevel = 0
+      storeLatch(0)
       discardReading()
+    } else {
+      // Learning where we are is the other half of the stored latch, and it can
+      // arrive after the file does.
+      adoptLatch()
     }
 
     if (hasLocation && alertsEnabled) checkNow()
@@ -627,8 +632,83 @@ Item {
   // situation that worsens still escalates.
   property int notifiedLevel: 0
 
+  // ...and held across the rebuilds that would otherwise empty it. See
+  // Alerts.latchRecord for why the file exists and what it is allowed to say;
+  // this half is only the plumbing.
+  //
+  // Keyed off a binding rather than off `locationKey`: that one is written by
+  // the location change handler, which can run before the `hasLocation` binding
+  // it consults has been re-evaluated, leaving it empty for the life of a
+  // session. A binding is always current by the time a forecast lands.
+  readonly property string latchPlaceKey: hasLocation
+    ? location.latitude + "," + location.longitude + "|" + locationName
+    : ""
+  property bool latchLoaded: false
+  property var storedLatch: null
+  property bool latchEvaluatePending: false
+
+  FileView {
+    id: latchFile
+    path: Quickshell.env("HOME") + "/.local/state/omarchy/weather-radar-alert.json"
+    atomicWrites: true
+    printErrors: false
+    onLoaded: root.receiveLatch(text())
+    onLoadFailed: root.receiveLatch("")
+  }
+
+  function receiveLatch(text) {
+    var record = null
+    try {
+      record = JSON.parse(String(text || ""))
+    } catch (e) {
+      record = null
+    }
+    storedLatch = record && typeof record === "object" ? record : null
+    latchLoaded = true
+    adoptLatch()
+
+    // A check can finish before the file does. Holding the verdict rather than
+    // dropping it means the first reading of a session is still acted on, once
+    // the service knows what it has already said.
+    if (latchEvaluatePending) {
+      latchEvaluatePending = false
+      evaluateAlert()
+    }
+  }
+
+  // Take up the stored latch once both halves are known. This file and the
+  // location file load independently and either can win, so adoption is
+  // attempted from both sides rather than assuming an order. Adoption only ever
+  // raises the latch, so worsening weather still escalates.
+  function adoptLatch() {
+    if (!latchLoaded) return
+    var level = Alerts.adoptedLevel(storedLatch, latchPlaceKey, Date.now(), Alerts.LATCH_MAX_AGE_MS)
+    if (level > notifiedLevel) notifiedLevel = level
+  }
+
+  function storeLatch(level) {
+    storedLatch = Alerts.latchRecord(level, latchPlaceKey, Date.now())
+    latchFile.setText(JSON.stringify(storedLatch || { level: 0 }) + "\n")
+  }
+
   function evaluateAlert() {
+    // Deciding before the stored latch has been read is deciding without
+    // knowing what has already been said, which is how the same storm gets
+    // announced twice.
+    if (!latchLoaded) {
+      latchEvaluatePending = true
+      return
+    }
+
+    // Every in-memory reset that was not a deliberate clear — a rebuild, most
+    // of all — is undone here, before the decision that reads it.
+    adoptLatch()
+
     var decision = Alerts.decideNotification(outlookLevel, notifiedLevel, alertThreshold, alertsEnabled)
+    // Written only when it moved. A latch that rewrites its own file every ten
+    // minutes for an unchanged value is disk traffic standing in for a fact
+    // that did not change.
+    if (decision.notifiedLevel !== notifiedLevel) storeLatch(decision.notifiedLevel)
     notifiedLevel = decision.notifiedLevel
     if (decision.notify) notify()
   }
@@ -743,6 +823,7 @@ Item {
     if (first || (!thresholdMoved && !radiusMoved)) return
 
     notifiedLevel = 0
+    storeLatch(0)
     if (radiusMoved) {
       if (hasLocation && alertsEnabled) checkNow()
     } else {
@@ -754,6 +835,7 @@ Item {
   onAlertsEnabledChanged: {
     if (!alertsEnabled) {
       notifiedLevel = 0
+      storeLatch(0)
       discardReading()
       // Stopping the process produces an exit code, and it is not an outage.
       if (forecastProc.running) forecastProc.cancelled = true
