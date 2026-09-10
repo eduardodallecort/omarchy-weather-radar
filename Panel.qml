@@ -595,7 +595,17 @@ Panel {
       onReturnRequested: root.playing = !root.playing
 
       Keys.onPressed: function(event) {
-        if (event.key === Qt.Key_Left) {
+        if (root.editingLocation) return
+        if (event.key === Qt.Key_Escape) {
+          root.close()
+          event.accepted = true
+        } else if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+          root.switchPanel((event.modifiers & Qt.ShiftModifier) || event.key === Qt.Key_Backtab ? -1 : 1)
+          event.accepted = true
+        } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+          root.playing = !root.playing
+          event.accepted = true
+        } else if (event.key === Qt.Key_Left) {
           root.playing = false
           root.frameIndex = Math.max(0, root.frameIndex - 1)
           event.accepted = true
