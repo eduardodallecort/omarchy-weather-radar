@@ -452,7 +452,6 @@ Panel {
   }
 
   function close() {
-    setCenterHoverRevealSuppressed(false)
     root.playing = false
     if (root.editingLocation) root.cancelEditingLocation()
     if (root.radar && root.manifestHeld) {
@@ -460,6 +459,7 @@ Panel {
       root.manifestHeld = false
     }
     root.controller.hide()
+    setCenterHoverRevealSuppressed(false)
   }
 
   function toggle() {
@@ -518,8 +518,11 @@ Panel {
   }
 
   function setCenterHoverRevealSuppressed(value) {
-    if (root.bar && "centerHoverRevealSuppressed" in root.bar)
-      root.bar.centerHoverRevealSuppressed = value
+    if (root.bar && typeof root.bar.setCenterHoverRevealSuppressed === "function") {
+      root.bar.setCenterHoverRevealSuppressed(value)
+    } else if (root.bar && "centerHoverRevealSuppressed" in root.bar) {
+      try { root.bar.centerHoverRevealSuppressed = value } catch (_) {}
+    }
   }
 
   IpcHandler {
