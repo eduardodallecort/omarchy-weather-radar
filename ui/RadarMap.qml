@@ -35,13 +35,6 @@ Item {
   property var radarTileUrlA: null
   property var radarTileUrlB: null
 
-  // The frame after the one coming in, fetched into a layer nobody sees so
-  // that it is in the pixmap cache before the loop asks for it. Without it the
-  // first pass through a loop is the only one that stutters, which is still
-  // the pass someone watches with the panel newly open.
-  property int prefetchFrame: -1
-  property var radarTileUrlPrefetch: null
-
   // Which of the two radar layers holds which frame, and which is in front.
   // Bumping a layer's frame while it is behind, then swapping, is what makes
   // the loop dissolve instead of flicker.
@@ -138,21 +131,6 @@ Item {
       centerLatitude: root.centerLatitude
       centerLongitude: root.centerLongitude
       zoom: root.zoom
-    }
-
-    // Fetches, draws nothing. An Image loads its source whether or not the item
-    // it belongs to is painted, which is the whole trick here.
-    TileLayer {
-      id: radarPrefetch
-      anchors.fill: parent
-      centerLatitude: root.centerLatitude
-      centerLongitude: root.centerLongitude
-      zoom: root.zoom
-      sourceZoom: root.radarSourceZoom
-      tileUrlFor: root.radarTileUrlPrefetch
-      revision: root.prefetchFrame + (root.colorSchemeId * 1000) + (root.frameEpoch * 100000)
-      smooth: root.smoothTiles
-      opacity: 0
     }
 
     TileLayer {
