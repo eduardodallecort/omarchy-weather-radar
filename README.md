@@ -161,6 +161,13 @@ and it writes to the same file, so a city chosen here moves the stock weather
 widget too, and one chosen there moves the radar. Both watch the file, so
 neither needs a restart.
 
+The alert latch lives in `~/.local/state/omarchy/weather-radar-alert.json` —
+the level you were last warned about, with the place and the time. It is written
+because the shell rebuilds every plugin service whenever any plugin writes
+inside its own directory, and a latch held only in memory is emptied by that,
+so a storm already announced gets announced again seconds later. Records older
+than three hours are ignored, so later weather still gets through.
+
 The location lives in `~/.local/state/omarchy/settings/weather.json`, owned by
 `omarchy-weather-location`, which can also be called directly:
 

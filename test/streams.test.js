@@ -32,10 +32,17 @@ const PROCESSES = [
 ]
 
 // Files read straight into the process, and why each one carries no ceiling of
-// its own. Both are deliberate; see the tests for the reasoning.
+// its own. All three are deliberate; see the tests for the reasoning.
 const FILE_READS = [
   { id: "locationFile", file: "Service.qml" },
   { id: "basemapFile", file: "Service.qml" },
+  // The alert latch. A small record this plugin normally owns, read without a
+  // byte ceiling exactly as `locationFile` already is. It is a file like any
+  // other — anything on the machine can write it and it outlives a reboot —
+  // so the defence is not ownership: `adoptedLevel` rejects any level outside
+  // the bands, and `latchPlaceKey` caps the only unbounded field, which leaves
+  // the record bounded by construction rather than by good behaviour upstream.
+  { id: "latchFile", file: "Service.qml" },
 ]
 
 function idsOf(pattern) {
