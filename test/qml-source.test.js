@@ -72,3 +72,17 @@ test("the notification body makes the place name inert", () => {
   assert.match(source, /description \+= " at " \+ inertText\(locationName\)/,
     "the place name reaches the notification body without being made inert")
 })
+
+// PluginBarApi exposes `centerHoverRevealSuppressed` as a readonly property.
+// In QML, `bar.setCenterHoverRevealSuppressed(v)` is the implicit setter for
+// that property, not a callable method: it throws TypeError, close() aborts
+// before the hide is committed, and the keyboard-panel layer stays mapped
+// full-screen. Escape, click-outside, and IPC hide all die the same way.
+test("the hover-reveal helper never writes the plugin bar flag", () => {
+  const source = read("Panel.qml")
+  const start = source.indexOf("function setCenterHoverRevealSuppressed")
+  assert.notEqual(start, -1, "the helper is missing")
+  const body = source.slice(start, source.indexOf("\n  IpcHandler", start))
+  assert.doesNotMatch(body, /root\.bar/,
+    "any write to the plugin bar API's hover-reveal flag throws and strands the panel")
+})

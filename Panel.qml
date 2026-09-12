@@ -452,13 +452,13 @@ Panel {
   }
 
   function close() {
+    root.controller.hide()
     root.playing = false
     if (root.editingLocation) root.cancelEditingLocation()
     if (root.radar && root.manifestHeld) {
       root.radar.releaseManifest()
       root.manifestHeld = false
     }
-    root.controller.hide()
     setCenterHoverRevealSuppressed(false)
   }
 
@@ -517,12 +517,14 @@ Panel {
     return false
   }
 
-  function setCenterHoverRevealSuppressed(value) {
-    if (root.bar && typeof root.bar.setCenterHoverRevealSuppressed === "function") {
-      root.bar.setCenterHoverRevealSuppressed(value)
-    } else if (root.bar && "centerHoverRevealSuppressed" in root.bar) {
-      try { root.bar.centerHoverRevealSuppressed = value } catch (_) {}
-    }
+  function setCenterHoverRevealSuppressed(_value) {
+    // Third-party widgets receive PluginBarApi, where this flag is readonly.
+    // QML treats `bar.setCenterHoverRevealSuppressed(v)` as that property's
+    // implicit setter — not as the method PluginBarApi declares — so the call
+    // throws TypeError. A throw inside close() aborts before the hide is
+    // committed, and the keyboard-panel layer stays mapped full-screen.
+    // The flag only hides the centre indicators while a hotkey-opened panel
+    // is up. Leaving it alone is better than trapping the session.
   }
 
   IpcHandler {
