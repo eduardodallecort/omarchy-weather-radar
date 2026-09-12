@@ -473,13 +473,14 @@ rather than turning up in a review.
 notification body is made inert first. Both are claims about source, which is
 why `test/text-format.sh` below renders them and measures what Qt actually does.
 
-The rest run the QML itself, under Quickshell rather than in Node. All skip
-where there is no `qs`, and `RADAR_REQUIRE_QS=1` turns that skip into a failure,
-which is what CI sets:
+The rest run the QML itself, under Quickshell or Qt rather than in Node. Each
+skips where its runtime is missing (`qs`, or `qml6` for the tile count), and
+`RADAR_REQUIRE_QS=1` turns that skip into a failure, which is what CI sets:
 
 ```bash
 ./test/first-run.sh      # a machine that has never set a weather location
 ./test/basemap-steps.sh  # decoding the ground never stalls the shell
+./test/tile-count.sh     # a radar layer counts the tiles it is still loading
 ./test/text-format.sh    # a place name cannot make the shell fetch a URL
 ```
 
@@ -496,6 +497,13 @@ nothing but this notices if that call is removed.
 real service decodes the ground, and fails on a stall: the decode runs in steps
 of a few milliseconds, one per frame, and this is what keeps it that way.
 
+`test/tile-count.sh` drives the real `ui/TileLayer.qml` through new frames,
+pans and missing tiles. The loop holds each crossfade until the incoming layer
+has its tiles, and the layer knows that only by counting them. A count that
+runs low reads as ready while tiles are still loading, and the fade starts
+against an empty layer with nothing visibly wrong. This checks at every step
+that the count equals the tiles actually loading.
+
 `test/text-format.sh` renders hostile strings under Qt and watches a socket. QML's `Text`
 defaults to `Text.AutoText`, which decides per string whether it is markup, so a
 place name shaped like an `<img>` tag is fetched over the network by the process
@@ -504,8 +512,9 @@ that owns the bar, the panels and the lock screen. Every `Text` here declares
 renders it as `Text.StyledText`, so the name goes through `Alerts.inertText`
 first.
 
-Only `Service.qml` can run on a runner. `Panel.qml` and `BarWidget.qml` import
-`qs.Commons` and `qs.Ui`, which exist only inside the shell.
+Only `Service.qml` and `ui/TileLayer.qml` can run on a runner. `Panel.qml`,
+`BarWidget.qml` and most of `ui/` import `qs.Commons` and `qs.Ui`, which exist
+only inside the shell.
 
 QML is also checked statically, which needs the shell's modules on the import
 path:

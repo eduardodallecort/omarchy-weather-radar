@@ -6,7 +6,7 @@ name: CI
 # the alert bands and the settings coercion — everything that lives in `lib/`
 # as a plain function. The QML job runs `Service.qml` itself under Quickshell,
 # which is the only check that the shell-facing half of the plugin is even
-# loadable. The listing checks cover what the marketplace re-verifies every day
+# loadable, and the radar's tile layer under Qt. The listing checks cover what the marketplace re-verifies every day
 # for as long as the plugin stays listed: a repository that fails them loses
 # its install button within a day, silently.
 #
@@ -15,7 +15,8 @@ name: CI
 # `qs.Commons` and `qs.Ui` on the import path, which do not exist on a runner,
 # so a job pretending to check them would only ever report that it could not
 # resolve the imports. `Service.qml` imports nothing but QtQuick and
-# Quickshell, which is why it alone can run here.
+# Quickshell, and `ui/TileLayer.qml` nothing but QtQuick, which is why those
+# two alone can run here.
 
 on:
   push:
@@ -82,6 +83,18 @@ jobs:
           XDG_RUNTIME_DIR: /tmp/runtime
           RADAR_REQUIRE_QS: "1"
         run: ./test/basemap-steps.sh
+
+      # The loop holds each crossfade until the incoming layer has its tiles,
+      # and a layer knows that only by counting them. A count that runs low
+      # reads as ready while the tiles are still loading, and the hold stops
+      # holding with nothing visibly wrong. This drives the real TileLayer
+      # through new frames, pans and missing tiles and checks the count at
+      # every step.
+      - name: A radar layer counts the tiles it is still loading
+        env:
+          QT_QPA_PLATFORM: offscreen
+          RADAR_REQUIRE_QS: "1"
+        run: ./test/tile-count.sh
 
       # test/qml-source.test.js establishes that every Text declares
       # Text.PlainText and that the notification body makes the place name

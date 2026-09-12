@@ -42,6 +42,39 @@ Item {
   property int frameB: -1
   property bool frontIsA: true
 
+  // The swap the panel has asked for, and the one actually on screen. They
+  // differ while the incoming layer is still fetching its tiles: fading to a
+  // layer that has not arrived is what a flicker is, so the request is held
+  // until the tiles are there. Held, not dropped — a layer that never
+  // completes, because the network is down or a tile 404s past the edge of
+  // coverage, still has to give way, so the fallback below swaps regardless.
+  property bool showA: true
+  readonly property var incomingLayer: frontIsA ? radarA : radarB
+
+  // Deferred, not immediate: the frame is written into the layer behind and the
+  // swap asked for in the same pass, and read at that moment the layer still
+  // reports the tiles it held before its sources were repointed. One turn of
+  // the loop later it reports the ones it is actually fetching.
+  onFrontIsAChanged: Qt.callLater(root.applySwapWhenReady)
+
+  function applySwapWhenReady() {
+    if (showA === frontIsA) return
+    if (incomingLayer.contentReady) {
+      swapFallback.stop()
+      showA = frontIsA
+    } else if (!swapFallback.running) {
+      swapFallback.restart()
+    }
+  }
+
+  Timer {
+    id: swapFallback
+    // Shorter than the shortest playback step, so a layer that will not finish
+    // loading costs the loop a frame's worth of delay rather than stalling it.
+    interval: 500
+    onTriggered: root.showA = root.frontIsA
+  }
+
   // Changes when the frame list is replaced. Folded into each layer's revision
   // so that a new manifest reloads the tiles even when the index did not move.
   property int frameEpoch: 0
@@ -110,7 +143,8 @@ Item {
       tileUrlFor: root.radarTileUrlA
       revision: root.frameA + (root.colorSchemeId * 1000) + (root.frameEpoch * 100000)
       smooth: root.smoothTiles
-      opacity: root.frontIsA ? 1 : 0
+      opacity: root.showA ? 1 : 0
+      onContentReadyChanged: root.applySwapWhenReady()
       Behavior on opacity {
         NumberAnimation { duration: 380; easing.type: Easing.InOutQuad }
       }
@@ -126,7 +160,8 @@ Item {
       tileUrlFor: root.radarTileUrlB
       revision: root.frameB + (root.colorSchemeId * 1000) + (root.frameEpoch * 100000)
       smooth: root.smoothTiles
-      opacity: root.frontIsA ? 0 : 1
+      opacity: !root.showA ? 1 : 0
+      onContentReadyChanged: root.applySwapWhenReady()
       Behavior on opacity {
         NumberAnimation { duration: 380; easing.type: Easing.InOutQuad }
       }
