@@ -179,7 +179,9 @@ Item {
 }
 PROBE
 
-out=$(cd "$work" && QT_QPA_PLATFORM=${QT_QPA_PLATFORM:-offscreen} QT_FORCE_STDERR_LOGGING=1 \
+# Offscreen unconditionally: a desktop session sets QT_QPA_PLATFORM to
+# wayland, and the probe would open a real window over whatever is there.
+out=$(cd "$work" && QT_QPA_PLATFORM=offscreen QT_FORCE_STDERR_LOGGING=1 \
       timeout 90 "$qml" probe.qml 2>&1 | sed -n 's/.*PROBE //p')
 
 if ! printf '%s\n' "$out" | grep -qx done; then
