@@ -122,10 +122,22 @@ Item {
       // while it is outstanding and taking it away once it settles. Counting
       // that way survives tiles being created and destroyed under a pan
       // without the layer ever having to recount them.
+      //
+      // `counted` is what makes it exact. The change handler also runs when
+      // the binding is first evaluated, so a tile born settled — no source
+      // yet, or a cached pixmap that is ready at once — would otherwise take
+      // away one it never added, and the layer would read as ready while its
+      // tiles were still loading.
       readonly property bool settled: source == "" || status === Image.Ready || status === Image.Error
-      onSettledChanged: root.pendingTiles += settled ? -1 : 1
-      Component.onCompleted: if (!settled) root.pendingTiles++
-      Component.onDestruction: if (!settled) root.pendingTiles--
+      property bool counted: false
+      function recount() {
+        if (counted === !settled) return
+        counted = !settled
+        root.pendingTiles += counted ? 1 : -1
+      }
+      onSettledChanged: recount()
+      Component.onCompleted: recount()
+      Component.onDestruction: if (counted) root.pendingTiles--
     }
   }
 }
