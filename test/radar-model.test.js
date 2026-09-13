@@ -410,3 +410,38 @@ test("coordinates that fail validation leave a name unresolved, not ready", () =
     assert.strictEqual(RadarModel.locationState(parsed), "unresolved", JSON.stringify(bad))
   }
 })
+
+// ------------------------------------------------------------------ the manifest as input from outside
+
+test("a frame path that is not a plain name is refused with its frame", () => {
+  // Paths go into every tile URL handed to curl and to Qt. A bracket curl
+  // would expand, a query, an escape, a dot, a missing leading slash that
+  // would join the host's name: each is refused, and its frame with it.
+  const hostile = [
+    "/v2/radar/[0-99999999]", "/v2/radar/{a,b,c}", "/v2/radar/x?y=1", "/v2/radar/../x",
+    "/v2/radar/a b", "/v2/radar/%5B0-9%5D", "v2/radar/x", "/v2/radar/x#y", "/v2//radar",
+  ]
+  for (const path of hostile) {
+    const raw = JSON.stringify({ host: "https://tilecache.rainviewer.com", radar: { past: [{ time: 1789000000, path }] } })
+    assert.strictEqual(RadarModel.parseManifest(raw), null, path)
+  }
+})
+
+test("a manifest cannot grow the loop past a bound", () => {
+  const past = []
+  for (let i = 0; i < 2000; i++) past.push({ time: 1789000000 + i * 600, path: "/v2/radar/f" + i })
+  const parsed = RadarModel.parseManifest(JSON.stringify({ host: "https://tilecache.rainviewer.com", radar: { past } }))
+  assert.strictEqual(parsed.past.length, RadarModel.MAX_FRAMES)
+  // The newest ones, since those are the loop.
+  assert.strictEqual(parsed.past[parsed.past.length - 1].time, 1789000000 + 1999 * 600)
+})
+
+test("the host is a bare https origin and nothing more", () => {
+  for (const good of ["https://tilecache.rainviewer.com", "https://h", "https://tilecache.rainviewer.com:443"]) {
+    assert.strictEqual(RadarModel.isTileHost(good), true, good)
+  }
+  for (const bad of ["https://h/path", "https://h?x", "https://[::1]", "https://a{b}",
+                     "https://-h", "https://h.", "https://", "https://h:123456", "http://h"]) {
+    assert.strictEqual(RadarModel.isTileHost(bad), false, bad)
+  }
+})

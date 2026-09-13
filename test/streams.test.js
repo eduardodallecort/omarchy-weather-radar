@@ -95,6 +95,9 @@ test("every request carries a ceiling on bytes as well as on time", () => {
     assert.ok(command.includes("--max-time"), `${name} has no time limit`)
     assert.ok(command.includes("--max-filesize"), `${name} has no size limit`)
     assert.ok(command.includes("-fsS"), `${name} would parse an error page as data`)
+    // Parts of these URLs come from outside, and curl would otherwise read
+    // brackets or braces in them as a list of URLs to fetch.
+    assert.ok(command.includes("--globoff"), `${name} lets curl expand the URL`)
 
     const bytes = Number(command[command.indexOf("--max-filesize") + 1])
     const seconds = Number(command[command.indexOf("--max-time") + 1])
