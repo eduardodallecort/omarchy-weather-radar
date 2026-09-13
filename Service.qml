@@ -94,7 +94,7 @@ Item {
 
   FileView {
     id: locationFile
-    path: Quickshell.env("HOME") + "/.local/state/omarchy/settings/weather.json"
+    path: RadarModel.locationFilePath(Quickshell.env("HOME"))
     watchChanges: true
     printErrors: false
     onFileChanged: reload()
@@ -1223,14 +1223,33 @@ Item {
   property var storedLatch: null
   property bool latchEvaluatePending: false
 
+  // A machine can have nowhere to keep it (no home), or refuse to (a state
+  // directory that is read-only, a full disk). Neither stops an alert: the
+  // latch is held in memory, and the only cost is that a reload of the
+  // service could announce a storm again. A write that fails is said once.
+  readonly property string latchPath: Alerts.latchFilePath(Quickshell.env("HOME"))
+  property bool latchWriteFailed: false
+
   FileView {
     id: latchFile
-    path: Quickshell.env("HOME") + "/.local/state/omarchy/weather-radar-alert.json"
+    path: root.latchPath
     atomicWrites: true
     printErrors: false
     onLoaded: root.receiveLatch(text())
     onLoadFailed: root.receiveLatch("")
+    onSaved: root.latchWriteFailed = false
+    onSaveFailed: {
+      if (!root.latchWriteFailed) {
+        console.warn("weather-radar: cannot write " + root.latchPath
+          + "; storm alerts still work, but a reload of the plugin may repeat one")
+      }
+      root.latchWriteFailed = true
+    }
   }
+
+  // A FileView with no path neither loads nor fails, and deciding an alert
+  // waits for the latch to be read, so with no file it is read as empty now.
+  Component.onCompleted: if (latchPath === "") receiveLatch("")
 
   function receiveLatch(text) {
     var record = null
@@ -1264,7 +1283,7 @@ Item {
 
   function storeLatch(level) {
     storedLatch = Alerts.latchRecord(level, latchPlaceKey, Date.now())
-    latchFile.setText(JSON.stringify(storedLatch || { level: 0 }) + "\n")
+    if (latchPath !== "") latchFile.setText(JSON.stringify(storedLatch || { level: 0 }) + "\n")
   }
 
   function evaluateAlert() {

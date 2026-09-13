@@ -492,3 +492,11 @@ test("a list dated far in the future does not hold off every real list after it"
   // Nor is a list up to an hour ahead thought bogus: a clock a little behind.
   assert.strictEqual(RadarModel.isNewerManifest(list([now + 1800]), real, now), false)
 })
+
+test("the location is read from under an absolute home, and from nowhere without one", () => {
+  assert.strictEqual(RadarModel.locationFilePath("/home/someone"),
+    "/home/someone/.local/state/omarchy/settings/weather.json")
+  for (const home of [undefined, null, "", "null", "relative", "/a\nb"]) {
+    assert.strictEqual(RadarModel.locationFilePath(home), "", String(home))
+  }
+})

@@ -375,6 +375,12 @@ memory would be emptied by that, and a storm already announced would be
 announced again seconds later. Records older than three hours are ignored, so
 later weather still gets through.
 
+Where the file cannot be written, a read-only state directory or a full disk,
+alerts still arrive. The record is then kept in memory for as long as the
+plugin runs, and the journal says so once. A session with no home directory has
+no location to watch, so it sends no alerts, but the plugin still loads and
+writes nothing anywhere.
+
 ### What the switch says
 
 The line under the STORM ALERTS heading reports what the watch is actually doing,
@@ -566,6 +572,7 @@ skip into a failure, which is what CI sets:
 ./test/tile-failures.sh  # a 429, a timeout and a repeated failure, and what the map says
 ./test/tile-limits.sh    # a deleted or unreadable tile, and the ceiling on tiles
 ./test/tile-recovery.sh  # the radar recovers on its own from hangs, sleep and outages
+./test/restricted-env.sh # a read-only state directory, and no HOME at all
 ./test/text-format.sh    # a place name cannot make the shell fetch a URL
 ```
 
@@ -594,6 +601,12 @@ tile that keeps arriving unreadable, and the ceiling on tiles.
 `tile-recovery.sh` switches the fake between working, slow, no network, hanging
 and a full disk, and checks that nothing can leave the radar stuck until the
 shell restarts.
+
+`test/restricted-env.sh` runs the service on machines unlike this one. Where
+the state directory cannot be written, the storm alert must still be sent, and
+the record that cannot be kept stays in memory with one line in the journal
+saying so. With no home at all, the service must still load without a tile
+cache, and nothing may be written anywhere.
 
 `test/tile-count.sh` drives the real `ui/TileLayer.qml` through new frames,
 pans and missing tiles. The loop holds each crossfade until the incoming layer

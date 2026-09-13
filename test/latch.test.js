@@ -142,3 +142,15 @@ test("two different places that share a capped prefix are still different places
   const record = Alerts.latchRecord(Alerts.SEVERE, a, NOW)
   assert.strictEqual(Alerts.adoptedLevel(record, b, NOW, Alerts.LATCH_MAX_AGE_MS), 0)
 })
+
+test("the record is kept under an absolute home, and nowhere without one", () => {
+  assert.strictEqual(Alerts.latchFilePath("/home/someone"),
+    "/home/someone/.local/state/omarchy/weather-radar-alert.json")
+  assert.strictEqual(Alerts.latchFilePath("/home/someone/"),
+    "/home/someone/.local/state/omarchy/weather-radar-alert.json")
+  // An unset home reads as null, and "null/.local/..." would be a path
+  // relative to wherever the shell happened to start.
+  for (const home of [undefined, null, "", "null", "relative/home", "/home/a\nb"]) {
+    assert.strictEqual(Alerts.latchFilePath(home), "", String(home))
+  }
+})

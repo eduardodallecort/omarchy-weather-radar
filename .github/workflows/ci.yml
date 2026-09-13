@@ -52,7 +52,8 @@ jobs:
       # `extra`, not the AUR, so this is one package and no build. python is
       # for the fake RainViewer and the tiles it serves (test/harness.sh) and
       # for the listener in test/text-format.sh; qml6 arrives with Quickshell's
-      # own dependency on qt6-declarative.
+      # own dependency on qt6-declarative. The job runs as root, which the
+      # tests allow for.
       - name: Install Quickshell
         run: pacman -Syu --noconfirm --needed quickshell git python
 
@@ -128,6 +129,14 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           RADAR_REQUIRE_QS: "1"
         run: ./test/tile-recovery.sh
+
+      # A plugin runs on other people's machines. A read-only state directory
+      # or no home at all must not stop the radar or the storm alert.
+      - name: Restricted environments do not stop the radar or the alert
+        env:
+          QT_QPA_PLATFORM: offscreen
+          RADAR_REQUIRE_QS: "1"
+        run: ./test/restricted-env.sh
 
       # test/qml-source.test.js establishes that every Text declares
       # Text.PlainText and that the notification body makes the place name

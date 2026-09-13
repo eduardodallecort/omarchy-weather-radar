@@ -37,11 +37,12 @@ require() {
 work=$(mktemp -d)
 home=$work/home
 mkdir -p "$work/bin" "$work/plugin" "$work/runtime" "$home"
-# A test with something of its own to stop, a listener say, puts it in
-# `on_exit`.
+# Made writable first, since a test may have taken the write bit away. A test
+# with something of its own to stop, a listener say, puts it in `on_exit`.
 on_exit=""
 harness_exit() {
   [[ -n $on_exit ]] && eval "$on_exit"
+  chmod -R u+w "$work" 2> /dev/null
   rm -rf "$work"
 }
 trap harness_exit EXIT
@@ -190,10 +191,11 @@ FAKE
 # particular, which every caller decides). What the probe reports as
 # "PROBE key=value" lines is read back with `value`; the whole output is in
 # `$out` for diagnostics. XDG's cache and state variables are always unset, so
-# nothing the machine running the test has set leaks into it.
+# nothing the machine running the test has set leaks into it. It runs from
+# `$run_dir` when that is set, `$work` otherwise.
 run_qs() {
   local seconds=$1; shift
-  out=$(cd "$work" && env -u XDG_CACHE_HOME -u XDG_STATE_HOME "$@" PATH="$work/bin:$PATH" \
+  out=$(cd "${run_dir:-$work}" && env -u XDG_CACHE_HOME -u XDG_STATE_HOME "$@" PATH="$work/bin:$PATH" \
         QT_QPA_PLATFORM=offscreen XDG_RUNTIME_DIR="$work/runtime" \
         timeout "$seconds" qs -p "$work/plugin/probe.qml" 2>&1)
   probe=$(printf '%s\n' "$out" | sed -n 's/.*PROBE //p')
