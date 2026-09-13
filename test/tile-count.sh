@@ -21,34 +21,8 @@
 # file:// URLs, so nothing reaches RainViewer. Needs `qml6`; skips without it,
 # and RADAR_REQUIRE_QS turns the skip into a failure, which is what CI sets.
 
-set -uo pipefail
-
-cd "$(dirname "$0")/.."
-plugin=$PWD
-
-qml=$(command -v qml6 || command -v /usr/lib/qt6/bin/qml || true)
-if [[ -z $qml ]]; then
-  if [[ -n ${RADAR_REQUIRE_QS:-} ]]; then
-    echo "RADAR_REQUIRE_QS is set and there is no qml6 on PATH" >&2
-    exit 1
-  fi
-  echo "no qml6 on PATH; skipping (set RADAR_REQUIRE_QS to make this fatal)"
-  exit 0
-fi
-
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
-
-failures=0
-check() {
-  local label=$1 expected=$2 actual=$3
-  if [[ $expected == "$actual" ]]; then
-    printf '  ok    %s\n' "$label"
-  else
-    printf '  FAIL  %s (expected %s, got %s)\n' "$label" "$expected" "$actual"
-    failures=$((failures + 1))
-  fi
-}
+source "$(dirname "$0")/harness.sh"
+require qml6 python3
 
 # The layer imports its projection by relative path, so the tree is staged
 # the way the plugin lays it out.
@@ -182,7 +156,7 @@ PROBE
 # Offscreen unconditionally: a desktop session sets QT_QPA_PLATFORM to
 # wayland, and the probe would open a real window over whatever is there.
 out=$(cd "$work" && QT_QPA_PLATFORM=offscreen QT_FORCE_STDERR_LOGGING=1 \
-      timeout 90 "$qml" probe.qml 2>&1 | sed -n 's/.*PROBE //p')
+      timeout 90 qml6 probe.qml 2>&1 | sed -n 's/.*PROBE //p')
 
 if ! printf '%s\n' "$out" | grep -qx done; then
   echo "  FAIL  the probe did not finish" >&2
@@ -200,9 +174,4 @@ done <<< "$out"
 lowest=$(printf '%s\n' "$out" | sed -n 's/^lowest|//p')
 check "the count never goes below zero" "0" "$lowest"
 
-echo
-if (( failures > 0 )); then
-  echo "tile count: $failures check(s) failed"
-  exit 1
-fi
-echo "tile count: all checks passed"
+finish "tile count"

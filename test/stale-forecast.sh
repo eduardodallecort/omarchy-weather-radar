@@ -22,40 +22,12 @@
 # omarchy-notification-send are all replaced on PATH. Skips without `qs`;
 # RADAR_REQUIRE_QS makes that skip fatal, which is what CI sets.
 
-set -uo pipefail
-
-cd "$(dirname "$0")/.."
-plugin=$PWD
-
-if ! command -v qs > /dev/null 2>&1; then
-  if [[ -n ${RADAR_REQUIRE_QS:-} ]]; then
-    echo "RADAR_REQUIRE_QS is set and there is no qs on PATH" >&2
-    exit 1
-  fi
-  echo "no qs on PATH; skipping (set RADAR_REQUIRE_QS to make this fatal)"
-  exit 0
-fi
-
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
-
-home=$work/home
-mkdir -p "$home" "$work/bin" "$work/plugin"
-
-failures=0
-check() {
-  local label=$1 expected=$2 actual=$3
-  if [[ $expected == "$actual" ]]; then
-    printf '  ok    %s\n' "$label"
-  else
-    printf '  FAIL  %s (expected %s, got %s)\n' "$label" "$expected" "$actual"
-    failures=$((failures + 1))
-  fi
-}
+source "$(dirname "$0")/harness.sh"
+require qs
 
 # ------------------------------------------------------------ the fake world
 
-cat > "$work/bin/omarchy-weather-location" <<'FAKE'
+fake omarchy-weather-location <<'FAKE'
 #!/usr/bin/env bash
 file=$HOME/.local/state/omarchy/settings/weather.json
 mkdir -p "$(dirname "$file")"
@@ -63,7 +35,7 @@ printf '{"name":"%s","latitude":%s,"longitude":%s}\n' "$2" "${3%,*}" "${3#*,}" >
 FAKE
 
 # Every toast the service sends, one line each, so the body can be read back.
-cat > "$work/bin/omarchy-notification-send" <<'FAKE'
+fake omarchy-notification-send <<'FAKE'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$HOME/notifications.log"
 FAKE
@@ -71,7 +43,7 @@ FAKE
 # Slow on purpose, and different per city. Reykjavik answers with drizzle,
 # Detroit with a downpour, so which response was applied is legible in the
 # outlook rather than having to be inferred.
-cat > "$work/bin/curl" <<'FAKE'
+fake curl <<'FAKE'
 #!/usr/bin/env bash
 url=""
 for arg in "$@"; do case "$arg" in https://*) url=$arg ;; esac; done
@@ -91,10 +63,8 @@ JSON
 esac
 FAKE
 
-chmod +x "$work/bin/omarchy-weather-location" "$work/bin/omarchy-notification-send" "$work/bin/curl"
 
-cp "$plugin/Service.qml" "$work/plugin/"
-cp -r "$plugin/lib" "$work/plugin/"
+stage_service
 
 cat > "$work/plugin/probe.qml" <<'PROBE'
 import QtQuick
@@ -161,12 +131,7 @@ ShellRoot {
 }
 PROBE
 
-out=$(env HOME="$home" PATH="$work/bin:$PATH" \
-      QT_QPA_PLATFORM=offscreen XDG_RUNTIME_DIR="$work/runtime" \
-      QT_LOGGING_RULES="*=true" \
-      timeout 90 qs -p "$work/plugin/probe.qml" 2>&1 | sed -n 's/.*PROBE //p')
-
-value() { printf '%s\n' "$out" | sed -n "s/^$1=//p" | tail -1; }
+run_qs 90 HOME="$home"
 
 if [[ $(value loaded) != "yes" ]]; then
   echo "  FAIL  Service.qml did not load under Quickshell" >&2
@@ -205,10 +170,4 @@ else
   failures=$((failures + 1))
 fi
 
-echo
-if [[ $failures -eq 0 ]]; then
-  echo "stale forecast: all checks passed"
-else
-  echo "stale forecast: $failures failed"
-fi
-[[ $failures -eq 0 ]]
+finish "stale forecast"
