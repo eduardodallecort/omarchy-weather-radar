@@ -124,3 +124,15 @@ test("an index chosen against another list is clamped before it is read", () => 
   assert.strictEqual(Frames.clampIndex(FIRST, 5), 5)
   assert.strictEqual(Frames.clampIndex([], 5), -1)
 })
+
+test("a layer finds the frame it shows by its moment, not its place in the list", () => {
+  const before = [{ time: 600 }, { time: 1200 }, { time: 1800 }]
+  const after = [{ time: 1200 }, { time: 1800 }, { time: 2400 }]
+  // The frame at 1200 moved from the second place to the first.
+  assert.strictEqual(Frames.indexOfTime(before, 1200), 1)
+  assert.strictEqual(Frames.indexOfTime(after, 1200), 0)
+  // One that left the list is not found, rather than replaced by a neighbour.
+  assert.strictEqual(Frames.indexOfTime(after, 600), -1)
+  assert.strictEqual(Frames.indexOfTime(after, 0), -1)
+  assert.strictEqual(Frames.indexOfTime(null, 1200), -1)
+})

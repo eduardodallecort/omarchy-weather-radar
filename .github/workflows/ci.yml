@@ -50,6 +50,7 @@ jobs:
     container: archlinux:latest
     steps:
       # `extra`, not the AUR, so this is one package and no build. python is
+      # for the fake RainViewer and the tiles it serves (test/harness.sh) and
       # for the listener in test/text-format.sh; qml6 arrives with Quickshell's
       # own dependency on qt6-declarative.
       - name: Install Quickshell
@@ -91,6 +92,42 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           RADAR_REQUIRE_QS: "1"
         run: ./test/tile-count.sh
+
+      # The loop's tiles are kept on disk so that each is fetched once, which is
+      # the whole reason the cache exists, so the claim is counted: the service
+      # runs against a fake RainViewer that logs every URL, is asked for the
+      # whole loop again, and must have fetched each tile exactly once.
+      - name: Each radar tile is fetched once, however long the loop plays
+        env:
+          QT_QPA_PLATFORM: offscreen
+          RADAR_REQUIRE_QS: "1"
+        run: ./test/tile-cache.sh
+
+      # A 429, a timeout, and one that repeats: what is waited for, what is
+      # retried and when, and what the map says about each.
+      - name: Failing tiles are retried, and the map says why
+        env:
+          QT_QPA_PLATFORM: offscreen
+          RADAR_REQUIRE_QS: "1"
+        run: ./test/tile-failures.sh
+
+      # A tile deleted from under the map, one that keeps arriving unreadable,
+      # and the ceiling on tiles.
+      - name: The tile cache keeps to its limits
+        env:
+          QT_QPA_PLATFORM: offscreen
+          RADAR_REQUIRE_QS: "1"
+        run: ./test/tile-limits.sh
+
+      # The ways the radar could get stuck and stay stuck until the shell was
+      # restarted: a batch that cannot be fetched, a batch that hangs, a check
+      # of the frame list missed while the machine slept, and the network
+      # coming back. Each must recover on its own.
+      - name: The radar recovers on its own
+        env:
+          QT_QPA_PLATFORM: offscreen
+          RADAR_REQUIRE_QS: "1"
+        run: ./test/tile-recovery.sh
 
       # test/qml-source.test.js establishes that every Text declares
       # Text.PlainText and that the notification body makes the place name

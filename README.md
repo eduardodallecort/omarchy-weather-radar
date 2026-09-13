@@ -62,13 +62,23 @@ That deletes the plugin and its entry in the bar. It leaves
 `~/.local/state/omarchy/settings/weather.json` alone, since that file belongs to
 the stock weather widget rather than to this plugin.
 
+Two files of the plugin's own stay behind as well, and both are safe to delete:
+the radar tiles it keeps (see [What it keeps on disk](#what-it-keeps-on-disk)),
+and the record of the last storm alert (see [Being told once](#being-told-once)).
+
+```bash
+rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/omarchy/plugins/eduardodallecort.weather-radar"
+rm -f ~/.local/state/omarchy/weather-radar-alert.json
+```
+
 ### Requirements
 
 Omarchy Quattro, and `curl`, which Omarchy already installs. The base map needs
 nothing at all — it ships with the plugin. The plugin calls
 `omarchy-weather-location` to store a chosen city and `omarchy-notification-send`
 to raise an alert — both ship with Omarchy. Nothing else is installed, and no
-configuration outside the widget's own entry is written.
+configuration outside the widget's own entry is written. Besides that entry it
+writes only the radar tile cache and the alert record named above.
 
 ## The map
 
@@ -92,9 +102,46 @@ does not move you: if you have scrubbed back to a particular time, you stay on
 that time, at whatever position it has moved to since — or on the oldest frame
 still published, once the moment has aged out of the two-hour window.
 
-While it is open the map looks for a new frame every ten minutes, which is about
-how often RainViewer publishes one — so the newest frame on screen can be up to
-a cycle behind theirs. Once you close it, the map asks for nothing.
+While it is open the map looks for the next frame a minute after it is due,
+ten minutes after the newest one it has, and then every minute until it is
+published — so a new frame is on screen a minute or two after RainViewer lists
+it. Once you close it, the map asks for nothing more: a batch of tiles already
+under way finishes, and that is all.
+
+### What it keeps on disk
+
+Each radar tile is fetched once and kept in
+`~/.cache/omarchy/plugins/eduardodallecort.weather-radar/tiles/` (or under
+`$XDG_CACHE_HOME`) for as long as its frame is in the two-hour loop. Playing the
+loop reads them back from there, so going round it again costs RainViewer
+nothing and a new frame every ten minutes costs one frame's tiles, however long
+a storm is watched.
+
+When the map opens, and whenever the view stops moving, the frame shown and
+the one after it are fetched straight away, which is all a paused map needs.
+While the loop plays, the rest of it follows once the view has stayed put for
+a second, so dragging across a region does not fetch thirteen frames at every
+stop on the way. A playing loop does not run ahead of its tiles: it waits on
+the frame it is showing until the next one has arrived, for up to seven
+seconds, and does not wait for a tile that has failed twice or that RainViewer
+refused. A frame arriving any other way, a new one published or a step by
+hand, fades in once its tiles are there, within the same seven seconds.
+
+A loop is a few megabytes. Tiles are deleted as their frame leaves the loop,
+which the map checks each time it receives a new frame list while open, and
+the directory is emptied the first time the map opens after the shell starts,
+or after it reloads its plugins, which it does whenever anything is written in
+a plugin's directory, an install or an update included. It never holds more
+than 2,000 tiles: past that it is emptied and refilled with what is on screen.
+The tiles are decoded from disk as the loop plays
+rather than held in memory, which would cost about 65 MB inside the process
+that draws the bar. If the cache cannot be written, a full disk or a directory
+that cannot be made, the map says so in the journal and loads tiles straight
+from the network for the rest of the session.
+
+The only other file the plugin writes is small: the record of the last storm
+alert, in `~/.local/state/omarchy/weather-radar-alert.json`, described under
+[Being told once](#being-told-once).
 
 ### What the colours mean
 
@@ -148,9 +195,30 @@ is: `Loading radar…` while the frames are on their way, and `Radar unavailable
 when fetching them failed and there are none.
 
 With frames already in hand it keeps drawing them, with no network at all — the
-images are cached by URL, so the last two hours stay on screen and the timeline
-underneath says which moment each one is. Opening the panel asks for anything
-missing, so reconnecting clears it without a restart.
+tiles are on disk, so the last two hours stay on screen and the timeline
+underneath says which moment each one is. While the panel is open, a frame
+list that failed is asked for again every minute, and opening the panel asks
+for anything missing, so reconnecting clears it without a restart.
+
+While the frame on screen is still waiting for some of its tiles, after a pan
+or a zoom, the map says `Loading radar…` once the wait has lasted a moment,
+since an empty stretch of map would otherwise read as clear sky.
+
+When the frame on screen needs tiles that are not on disk and cannot be
+fetched, the map says so instead of showing an empty sky:
+`Radar paused: RainViewer is limiting requests` as soon as RainViewer answers
+with its rate limit, and `Couldn't load the radar` for anything else — no
+network, a timeout, a server error — once a tile has failed twice. A single
+failure is ordinary: a new frame's tiles often arrive a little after the frame
+is announced, so the first retry comes five seconds later, and the later ones
+after a growing delay: never more than half a minute when nothing answered at
+all, so the map notices the network coming back by itself. The panel opening
+again retries them at once, and so does any tile arriving, for tiles that
+failed while nothing arrived at all. A tile that fails while the tiles beside
+it arrive keeps its own delay. A rate limit is always waited out first. Every failure is logged, with the status RainViewer answered, and
+both messages clear on their own once the tiles arrive. Tiles
+already on disk never raise either message, so a loop fetched earlier plays
+offline without a warning over it.
 
 ## Location
 
@@ -160,13 +228,6 @@ The picker is the stock weather widget's — same geocoding, same suggestions �
 and it writes to the same file, so a city chosen here moves the stock weather
 widget too, and one chosen there moves the radar. Both watch the file, so
 neither needs a restart.
-
-The alert latch lives in `~/.local/state/omarchy/weather-radar-alert.json` —
-the level you were last warned about, with the place and the time. It is written
-because the shell rebuilds every plugin service whenever any plugin writes
-inside its own directory, and a latch held only in memory is emptied by that,
-so a storm already announced gets announced again seconds later. Records older
-than three hours are ignored, so later weather still gets through.
 
 The location lives in `~/.local/state/omarchy/settings/weather.json`, owned by
 `omarchy-weather-location`, which can also be called directly:
@@ -194,8 +255,10 @@ Alerts are **off by default**. Turn them on from the toggle in the panel.
 
 While on, the plugin checks the forecast every ten minutes — the forecast model
 does not update any faster, so checking more often would re-fetch bytes that
-have not changed. That is roughly 15 MB a month. With alerts off it makes no
-background requests at all, and fetches only while the map is open.
+have not changed. That is roughly 15 MB a month. When checks keep failing and
+the panel is closed, it waits longer between them, up to an hour; opening the
+panel asks again at once. With alerts off it makes no background requests at
+all, and fetches only while the map is open.
 
 Two settings shape what reaches you, and they answer different questions. The
 **radius** decides how far ahead to look; the **threshold** decides how bad it
@@ -304,6 +367,14 @@ Those are two different questions. Opening the panel refreshes a reading that
 has gone stale or was failing; it does not tell you again about weather you have
 already been told about. Switching the toggle off and on is what does that.
 
+What you were last told is kept in
+`~/.local/state/omarchy/weather-radar-alert.json`: the level, the place and the
+time. It is written to disk because the shell rebuilds every plugin service
+whenever any plugin writes inside its own directory. A record held only in
+memory would be emptied by that, and a storm already announced would be
+announced again seconds later. Records older than three hours are ignored, so
+later weather still gets through.
+
 ### What the switch says
 
 The line under the STORM ALERTS heading reports what the watch is actually doing,
@@ -404,12 +475,13 @@ appears to do nothing is usually an edit that was never loaded.
 
 ### Layout
 
-Everything that is a plain function lives in `lib/` and is tested; everything
-that needs the shell to exist lives in a `.qml` file and is not.
+Everything that is a plain function lives in `lib/`, where Node tests it.
+Everything that needs Qt lives in a `.qml` file, and is tested by running it
+wherever that can be done outside the shell (see [Tests](#tests)).
 
 | File | |
 | --- | --- |
-| `Service.qml` | headless singleton: frame manifest, forecast polling, alert decisions |
+| `Service.qml` | headless singleton: frame manifest, radar tile cache, forecast polling, alert decisions |
 | `Panel.qml` | panel state and lifecycle; composes the pieces below |
 | `BarWidget.qml` | the bar pill |
 | `ui/RadarMap.qml` | basemap, radar layers, alert rings, pan and zoom |
@@ -422,6 +494,7 @@ that needs the shell to exist lives in a `.qml` file and is not.
 | `ui/ChoiceSection.qml` | a heading, what it costs, and a row of equal buttons |
 | `lib/TileMath.js` | Web Mercator projection, distance and bearing |
 | `lib/RadarModel.js` | RainViewer endpoints, parsing, echo analysis, sampling |
+| `lib/TileCache.js` | where each radar tile is kept on disk, and the commands that fetch and delete them |
 | `lib/Alerts.js` | intensity bands, forecast reduction, the latch, and what the panel says |
 | `lib/Settings.js` | reading and coercing the widget's settings |
 | `lib/Basemap.js` | decodes `data/basemap.bin` and projects it into the viewport |
@@ -459,8 +532,10 @@ node --test
 ```
 
 They cover the projection, the RainViewer and Open-Meteo parsing, the alert
-bands and latch, the settings coercion, the frame selection and the glyph
-codepoints. Some of them pin bugs that have already been fixed once.
+bands and latch, the settings coercion, the frame selection, when the frame
+list is next asked for, the tile cache's names, commands, retry delays and
+notices, and the glyph codepoints. Some of them pin bugs that have already been
+fixed once.
 
 `test/streams.test.js` is a different kind of check: it holds the QML sources to
 a written-down inventory of everything that reaches the shell process, and to a
@@ -473,20 +548,29 @@ rather than turning up in a review.
 notification body is made inert first. Both are claims about source, which is
 why `test/text-format.sh` below renders them and measures what Qt actually does.
 
-The rest run the QML itself, under Quickshell or Qt rather than in Node. Each
-skips where its runtime is missing (`qs`, or `qml6` for the tile count), and
-`RADAR_REQUIRE_QS=1` turns that skip into a failure, which is what CI sets:
+The rest run the QML itself, under Quickshell or Qt rather than in Node,
+offline, with the commands the plugin calls replaced on PATH. What they share —
+how a missing runtime skips, how a check is reported, a fake RainViewer that can
+be switched between working, slow, no network, hanging and a full disk, or made
+to refuse chosen tiles with a 429 or a timeout — is
+`test/harness.sh`, with `test/probe/Kit.qml` for the probes. Each skips where
+its runtime is missing (`qs`, or `qml6`), and `RADAR_REQUIRE_QS=1` turns that
+skip into a failure, which is what CI sets:
 
 ```bash
 ./test/first-run.sh      # a machine that has never set a weather location
+./test/stale-forecast.sh # a forecast answers the question that was asked
 ./test/basemap-steps.sh  # decoding the ground never stalls the shell
 ./test/tile-count.sh     # a radar layer counts the tiles it is still loading
+./test/tile-cache.sh     # each radar tile is fetched once, however long the loop plays
+./test/tile-failures.sh  # a 429, a timeout and a repeated failure, and what the map says
+./test/tile-limits.sh    # a deleted or unreadable tile, and the ceiling on tiles
+./test/tile-recovery.sh  # the radar recovers on its own from hangs, sleep and outages
 ./test/text-format.sh    # a place name cannot make the shell fetch a URL
 ```
 
 The first loads the real `Service.qml` against a home directory that does not
-exist, with `curl` and `omarchy-weather-location` replaced so nothing reaches
-the network. It exists for a gap the code can only assert in a comment: the
+exist. It exists for a gap the code can only assert in a comment: the
 location file is watched, but a watch reaches no further than the directory
 holding it, and on a fresh machine that directory has never been created — so
 the first location ever written is invisible to the watch meant to notice it.
@@ -497,6 +581,20 @@ nothing but this notices if that call is removed.
 real service decodes the ground, and fails on a stall: the decode runs in steps
 of a few milliseconds, one per frame, and this is what keeps it that way.
 
+`tile-cache.sh`, `tile-failures.sh`, `tile-limits.sh` and `tile-recovery.sh` run
+the real service against the fake RainViewer, which logs every URL.
+`tile-cache.sh` fetches a whole loop, asks for it again, and fails unless every
+tile was requested exactly once; it also checks that an
+earlier session's cache is cleared first, that two maps both get their loop,
+that a frame leaving the loop takes its tiles with it, and when the frame list
+is next looked at. `tile-failures.sh` makes the newest frame fail with 429s and
+timeouts, and checks what is waited for, what is retried and when, and what
+the map says. `tile-limits.sh` covers a file deleted from under the map, a
+tile that keeps arriving unreadable, and the ceiling on tiles.
+`tile-recovery.sh` switches the fake between working, slow, no network, hanging
+and a full disk, and checks that nothing can leave the radar stuck until the
+shell restarts.
+
 `test/tile-count.sh` drives the real `ui/TileLayer.qml` through new frames,
 pans and missing tiles. The loop holds each crossfade until the incoming layer
 has its tiles, and the layer knows that only by counting them. A count that
@@ -504,8 +602,9 @@ runs low reads as ready while tiles are still loading, and the fade starts
 against an empty layer with nothing visibly wrong. This checks at every step
 that the count equals the tiles actually loading.
 
-`test/text-format.sh` renders hostile strings under Qt and watches a socket. QML's `Text`
-defaults to `Text.AutoText`, which decides per string whether it is markup, so a
+`test/text-format.sh` renders hostile strings under Qt and watches a socket.
+QML's `Text` defaults to `Text.AutoText`, which decides per string whether it is
+markup, so a
 place name shaped like an `<img>` tag is fetched over the network by the process
 that owns the bar, the panels and the lock screen. Every `Text` here declares
 `Text.PlainText`; the notification body cannot, because Omarchy's own card
@@ -524,8 +623,8 @@ qmllint -I /usr/share/omarchy/shell -I . *.qml ui/*.qml
 ```
 
 `Panel.qml` fails this on the typed function signatures inside its `IpcHandler`,
-which Quickshell requires and this `qmllint` cannot parse. The other files are
-clean.
+which Quickshell requires and this `qmllint` cannot parse. It fails without a
+message, so check the exit status: 255 for `Panel.qml`, 0 for every other file.
 
 ## Licence
 

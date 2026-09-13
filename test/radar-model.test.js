@@ -411,6 +411,28 @@ test("coordinates that fail validation leave a name unresolved, not ready", () =
   }
 })
 
+// ------------------------------------------------------------------ asking for the next frame
+
+test("the open map asks for the next frame a minute after it is due", () => {
+  const latest = 1789250000
+  const now = latest * 1000 + 3 * 60000
+  // Due at latest + 10 min + 1 min: eight minutes from now.
+  assert.strictEqual(RadarModel.nextManifestCheckMs(latest, now), 8 * 60000)
+})
+
+test("a frame that is late is asked for once a minute, not faster", () => {
+  const latest = 1789250000
+  assert.strictEqual(RadarModel.nextManifestCheckMs(latest, (latest + 700) * 1000), 60000)
+  assert.strictEqual(RadarModel.nextManifestCheckMs(latest, (latest + 5000) * 1000), 60000)
+  assert.strictEqual(RadarModel.nextManifestCheckMs(0, Date.now()), 60000)
+})
+
+test("a clock that has moved cannot put the next check off beyond one cycle", () => {
+  const latest = 1789250000
+  // The newest frame reads as an hour in the future: the clock went back.
+  assert.strictEqual(RadarModel.nextManifestCheckMs(latest, (latest - 3600) * 1000), 11 * 60000)
+})
+
 // ------------------------------------------------------------------ the manifest as input from outside
 
 test("a frame path that is not a plain name is refused with its frame", () => {
@@ -444,4 +466,29 @@ test("the host is a bare https origin and nothing more", () => {
                      "https://-h", "https://h.", "https://", "https://h:123456", "http://h"]) {
     assert.strictEqual(RadarModel.isTileHost(bad), false, bad)
   }
+})
+
+test("an unchanged or older frame list is not taken", () => {
+  const list = (times, host) => ({ host: host || "https://tilecache.rainviewer.com", past: times.map(t => ({ time: t, path: "/v2/radar/f" + t })) })
+  const current = list([1000, 1600, 2200])
+  assert.strictEqual(RadarModel.isNewerManifest(current, list([1000, 1600, 2200])), false)
+  assert.strictEqual(RadarModel.isNewerManifest(current, list([400, 1000, 1600])), false)
+  assert.strictEqual(RadarModel.isNewerManifest(current, list([1600, 2200, 2800])), true)
+  assert.strictEqual(RadarModel.isNewerManifest(current, list([1000, 1600, 2200], "https://other")), true)
+  assert.strictEqual(RadarModel.isNewerManifest(null, current), true)
+  assert.strictEqual(RadarModel.isNewerManifest(current, null), false)
+  const renamed = list([1000, 1600, 2200]); renamed.past[2].path = "/v2/radar/new"
+  assert.strictEqual(RadarModel.isNewerManifest(current, renamed), true)
+})
+
+test("a list dated far in the future does not hold off every real list after it", () => {
+  const list = (times) => ({ host: "https://tilecache.rainviewer.com", past: times.map(t => ({ time: t, path: "/v2/radar/f" + t })) })
+  const now = 1789250000
+  const bogus = list([now - 600, now + 86400 * 365])
+  const real = list([now - 1200, now - 600, now])
+  assert.strictEqual(RadarModel.isNewerManifest(bogus, real, now), true)
+  // A real list is still not replaced by an older one.
+  assert.strictEqual(RadarModel.isNewerManifest(real, list([now - 1800, now - 1200]), now), false)
+  // Nor is a list up to an hour ahead thought bogus: a clock a little behind.
+  assert.strictEqual(RadarModel.isNewerManifest(list([now + 1800]), real, now), false)
 })

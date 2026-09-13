@@ -79,10 +79,110 @@ fake() {
 stage_service() {
   cp "$plugin/Service.qml" "$work/plugin/"
   cp -r "$plugin/lib" "$work/plugin/"
+  cp "$plugin/test/probe/Kit.qml" "$work/plugin/"
   if [[ ${1:-} == --basemap ]]; then
     mkdir -p "$work/plugin/data"
     cp "$plugin/data/basemap.bin" "$work/plugin/data/"
   fi
+}
+
+# A 256 px translucent PNG, a stand-in for any radar tile.
+tile_png() {
+  python3 - "$1" <<'PY'
+import struct, sys, zlib
+def chunk(kind, data):
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff)
+row = b"\x00" + bytes((40, 120, 220, 160)) * 256
+open(sys.argv[1], "wb").write(b"\x89PNG\r\n\x1a\n"
+    + chunk(b"IHDR", struct.pack(">IIBBBBB", 256, 256, 8, 6, 0, 0, 0))
+    + chunk(b"IDAT", zlib.compress(row * 256)) + chunk(b"IEND", b""))
+PY
+}
+
+# A RainViewer frame list, one frame every ten minutes from one moment to
+# another, in epoch seconds.
+manifest_json() {
+  local t out=""
+  for (( t = $1; t <= $2; t += 600 )); do out+="${out:+,}{\"time\":$t,\"path\":\"/v2/radar/$t\"}"; done
+  printf '{"host":"https://tilecache.rainviewer.com","radar":{"past":[%s]}}' "$out"
+}
+
+# RainViewer, reduced to what the service asks of it, and switchable while a
+# probe runs.
+#
+# The frame list comes back from `$work/plugin/current-manifest.json`. A batch
+# of tiles is URL/-o pairs, answered the way real curl reports them. Each URL
+# is logged to `$work/plugin/requests.log`, and each call to
+# `$work/plugin/calls.log`. How it answers is read from two files on every call:
+#
+#   mode   ok        answers
+#          down      no network at all: exit 7, no status
+#          hang      answers the frame list, never finishes a batch
+#          hanglist  never answers the frame list
+#          full      a disk with no room: exit 23
+#          slow      answers, a second and a half late for every batch
+#   rules  lines of "<text in the URL> <answer>", the first match winning:
+#          429       RainViewer's rate limit
+#          timeout   nothing answered (exit 28, no status)
+#          parity    429 in even tile columns, a timeout in odd ones
+fake_rainviewer() {
+  tile_png "$work/tile.png"
+  echo ok > "$work/plugin/mode"
+  : > "$work/plugin/rules"
+  : > "$work/plugin/requests.log"
+  : > "$work/plugin/calls.log"
+  fake curl <<FAKE
+#!/usr/bin/env python3
+import os, shutil, sys, time
+here = "$work/plugin"
+mode = open(here + "/mode").read().strip()
+rules = [line.split() for line in open(here + "/rules") if len(line.split()) == 2]
+args = sys.argv[1:]
+with open(here + "/calls.log", "a") as log:
+    log.write(("batch " if "-o" in args else "manifest ") + mode + "\n")
+if "-o" not in args:
+    if not any("api.rainviewer.com" in a for a in args):
+        sys.exit(22)
+    if mode == "down":
+        sys.exit(7)
+    if mode == "hanglist":
+        time.sleep(600)
+    sys.stdout.write(open(here + "/current-manifest.json").read())
+    sys.exit(0)
+if mode == "hang":
+    time.sleep(600)
+if mode == "slow":
+    time.sleep(1.5)
+i = 0
+while i < len(args):
+    if not (args[i].startswith("https://") and i + 2 < len(args) and args[i + 1] == "-o"):
+        i += 1
+        continue
+    url, path = args[i], args[i + 2]
+    i += 3
+    with open(here + "/requests.log", "a") as log:
+        log.write(url + "\n")
+    answer = next((a for text, a in rules if text in url), "ok")
+    if answer == "parity":
+        answer = "429" if int(url.split("/")[-4]) % 2 == 0 else "timeout"
+    if mode == "down":
+        print("7 000 " + path)
+    elif mode == "full":
+        print("23 200 " + path)
+    elif answer == "429":
+        print("22 429 " + path)
+    elif answer == "timeout":
+        print("28 000 " + path)
+    else:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        shutil.copyfile("$work/tile.png", path)
+        print("0 200 " + path)
+    sys.stdout.flush()
+FAKE
+  fake omarchy-weather-location <<'FAKE'
+#!/usr/bin/env bash
+exit 0
+FAKE
 }
 
 # Runs `$work/plugin/probe.qml` under Quickshell, offline and offscreen, for at
@@ -100,3 +200,35 @@ run_qs() {
 }
 
 value() { printf '%s\n' "$probe" | sed -n "s/^$1=//p" | tail -1; }
+
+# Stops the test when the probe did not get to the end, with what it said,
+# rather than reporting every check after it as a failure of its own.
+require_done() {
+  if [[ $(value done) != "yes" ]]; then
+    echo "  FAIL  the probe did not finish" >&2
+    printf '%s\n' "$probe" >&2
+    printf '%s\n' "$out" | grep -iE "error|warn|timeout" | head -20 >&2
+    exit 1
+  fi
+}
+
+# How many URLs a log holds between two marker lines a probe wrote, or from
+# one to the end. Says "missing marker" rather than a count when either marker
+# is not there exactly once, so a check on the window cannot pass because the
+# window was never marked.
+urls_between() { # file from [to]
+  local file=$1 from=$2 to=${3:-}
+  if [[ $(grep -cx "$from" "$file") != 1 || ( -n $to && $(grep -cx "$to" "$file") != 1 ) ]]; then
+    echo "missing marker"
+    return
+  fi
+  if [[ -n $to ]]; then
+    sed -n "/^$from\$/,/^$to\$/p" "$file" | grep -c '^https'
+  else
+    sed -n "/^$from\$/,\$p" "$file" | grep -c '^https'
+  fi
+}
+
+# Whether "n/total" is a whole, non-empty set: every one of total, and more
+# than none.
+all_of() { [[ ${1%/*} == "${1#*/}" && ${1#*/} -gt 0 ]] && echo yes || echo "no ($1)"; }

@@ -8,9 +8,10 @@ import "../lib/TileMath.js" as TileMath
 // every layer has to share a centre and zoom: any drift between them would
 // show up as the rain sitting next to the coastline instead of on it.
 //
-// Tiles are plain Image elements. Qt's pixmap cache keys on URL, and RainViewer
-// tile URLs are immutable per frame, so scrubbing back through the loop or
-// panning to somewhere already visited costs nothing the second time.
+// Tiles are plain Image elements, loaded from wherever the owner says. For the
+// radar that is the service's copy on disk rather than the network: Qt keeps
+// only a few megabytes of images nothing is drawing, far less than one pass
+// through the loop, so it cannot be what makes the second pass free.
 Item {
   id: root
 
@@ -30,26 +31,30 @@ Item {
 
   readonly property real sourceScale: Math.pow(2, zoom - sourceZoom)
 
-  // function(zoom, x, y) -> string. Returning "" skips the tile, which is how
-  // a layer stays blank until its data is ready.
+  // function(zoom, x, y) -> the tile's URL, "" for a tile with nothing to
+  // draw, or null for one that is on its way but cannot be loaded yet. A null
+  // tile draws nothing, like "", but counts as outstanding until it arrives.
   property var tileUrlFor: null
 
-  // Bumped by the owner to force a reload when the URL scheme itself changes
-  // (a new frame, a different palette) so bindings re-evaluate. It is read by
-  // each tile's source binding rather than by the model below: a new frame
-  // must repoint the tiles, not tear the whole grid down and build it again.
-  property int revision: 0
+  // Changed by the owner whenever the tiles it would ask for change (a new
+  // frame, a different palette), so bindings re-evaluate; any value, only its
+  // changes matter. It is read by each tile's source binding rather than by
+  // the model below: a new frame must repoint the tiles, not tear the whole
+  // grid down and build it again.
+  property var revision: 0
 
-  // Tiles still waiting on the network. Zero means every tile this layer wants
-  // is on screen, which is what lets the owner hold a crossfade back until the
-  // incoming frame is actually there to fade to.
+  // Tiles not on screen yet, whether still loading or not yet loadable. Zero
+  // means every tile this layer wants is drawn, which is what lets the owner
+  // hold a crossfade back until the incoming frame is actually there to fade
+  // to.
   property int pendingTiles: 0
   readonly property bool contentReady: pendingTiles <= 0
 
   property int tileSize: 256
   property bool smooth: true
 
-  signal tileFailed()
+  // A tile that could not be loaded, with the source it was loaded from.
+  signal tileFailed(string source)
 
   clip: true
 
@@ -94,11 +99,13 @@ Item {
       width: root.tileSize * root.sourceScale
       height: root.tileSize * root.sourceScale
 
-      source: {
+      readonly property var target: {
         // Read so a new frame or palette repoints this tile in place.
         var unused = root.revision
         return root.tileUrlFor ? root.tileUrlFor(root.sourceZoom, modelData.tileX, modelData.tileY) : ""
       }
+      readonly property bool awaiting: target === null
+      source: awaiting ? "" : target
       asynchronous: true
       cache: true
       // The loader is asked for a tile-sized surface rather than whatever the
@@ -116,7 +123,7 @@ Item {
       // for a tile with no data either, but that arrives as a transparent
       // image rather than as an error.
       visible: status === Image.Ready
-      onStatusChanged: if (status === Image.Error) root.tileFailed()
+      onStatusChanged: if (status === Image.Error) root.tileFailed(String(source))
 
       // Each tile reports only its own state, adding one to the layer's count
       // while it is outstanding and taking it away once it settles. Counting
@@ -128,7 +135,8 @@ Item {
       // yet, or a cached pixmap that is ready at once — would otherwise take
       // away one it never added, and the layer would read as ready while its
       // tiles were still loading.
-      readonly property bool settled: source == "" || status === Image.Ready || status === Image.Error
+      readonly property bool settled: !awaiting
+        && (source == "" || status === Image.Ready || status === Image.Error)
       property bool counted: false
       function recount() {
         if (counted === !settled) return

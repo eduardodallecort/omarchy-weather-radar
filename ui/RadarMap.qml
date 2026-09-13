@@ -31,15 +31,16 @@ Item {
   // and get scaled up over a basemap that is still sharpening.
   property int radarSourceZoom: zoom
 
-  // function(zoom, x, y) -> string, one per radar layer. See RadarModel.
+  // function(zoom, x, y) -> the tile's URL, "" or null, one per radar layer.
+  // See TileLayer.tileUrlFor.
   property var radarTileUrlA: null
   property var radarTileUrlB: null
 
-  // Which of the two radar layers holds which frame, and which is in front.
-  // Bumping a layer's frame while it is behind, then swapping, is what makes
-  // the loop dissolve instead of flicker.
-  property int frameA: -1
-  property int frameB: -1
+  // Which of the two radar layers holds which frame, by the frame's moment, and
+  // which is in front. Bumping a layer's frame while it is behind, then
+  // swapping, is what makes the loop dissolve instead of flicker.
+  property real frameA: 0
+  property real frameB: 0
   property bool frontIsA: true
 
   // The swap the panel has asked for, and the one actually on screen. They
@@ -50,6 +51,11 @@ Item {
   // coverage, still has to give way, so the fallback below swaps regardless.
   property bool showA: true
   readonly property var incomingLayer: frontIsA ? radarA : radarB
+
+  // A swap asked for and not yet on screen. Another frame arriving meanwhile
+  // goes into the same incoming layer rather than the one on screen, which
+  // would change under the viewer with no crossfade.
+  readonly property bool swapPending: showA !== frontIsA
 
   // Deferred, not immediate: the frame is written into the layer behind and the
   // swap asked for in the same pass, and read at that moment the layer still
@@ -69,14 +75,18 @@ Item {
 
   Timer {
     id: swapFallback
-    // Shorter than the shortest playback step, so a layer that will not finish
-    // loading costs the loop a frame's worth of delay rather than stalling it.
-    interval: 500
+    // The loop itself waits for a frame's tiles before stepping to it, so what
+    // this holds is a frame arriving any other way: a new list, a step by
+    // hand. Long enough for a tile of a frame just published to fail once and
+    // arrive on its retry five seconds later, as the loop's own wait is; the
+    // map says it is loading meanwhile.
+    interval: 7000
     onTriggered: root.showA = root.frontIsA
   }
 
-  // Changes when the frame list is replaced. Folded into each layer's revision
-  // so that a new manifest reloads the tiles even when the index did not move.
+  // Changes when the frame list is replaced or the panel is opened again.
+  // Folded into each layer's revision, so that every tile asks again where it
+  // is to be loaded from.
   property int frameEpoch: 0
   property int colorSchemeId: 2
   property bool smoothTiles: true
@@ -96,16 +106,24 @@ Item {
   // because it has not arrived yet. An empty map that says it is loading, for
   // as long as the network is down, is the wrong half of that.
   //
-  // Only the list. Whether the tiles under it can be fetched is deliberately
-  // not reported: the layers cache by URL, so a map holding frames it fetched
-  // before goes on drawing them with no network at all — correctly, and with
-  // the frame's own time under it. Counting tile errors flagged that healthy
-  // case as an outage while missing the one it was written for.
+  // Only the list. Tiles that cannot be fetched are `notice`, below.
   property bool radarUnavailable: false
+
+  // Said over a map that has frames but cannot draw the one on screen, or ""
+  // when there is nothing to say. The panel decides it from what the tile
+  // cache knows: which of the tiles in view are on disk, which are still on
+  // their way, and which failed and how. A map drawing a loop it fetched
+  // earlier, with no network at all, says nothing, because nothing on screen
+  // is missing.
+  property string notice: ""
 
   property string attribution: ""
 
   signal dragged(real latitude, real longitude)
+
+  // A radar tile that could not be loaded, from either layer. See
+  // TileLayer.tileFailed.
+  signal tileFailed(string source)
   signal recenterRequested()
 
   // Zooming carries a centre because the wheel zooms towards the pointer, not
@@ -141,10 +159,11 @@ Item {
       zoom: root.zoom
       sourceZoom: root.radarSourceZoom
       tileUrlFor: root.radarTileUrlA
-      revision: root.frameA + (root.colorSchemeId * 1000) + (root.frameEpoch * 100000)
+      revision: root.frameA + ":" + root.colorSchemeId + ":" + root.frameEpoch
       smooth: root.smoothTiles
       opacity: root.showA ? 1 : 0
       onContentReadyChanged: root.applySwapWhenReady()
+      onTileFailed: function(source) { root.tileFailed(source) }
       Behavior on opacity {
         NumberAnimation { duration: 380; easing.type: Easing.InOutQuad }
       }
@@ -158,10 +177,11 @@ Item {
       zoom: root.zoom
       sourceZoom: root.radarSourceZoom
       tileUrlFor: root.radarTileUrlB
-      revision: root.frameB + (root.colorSchemeId * 1000) + (root.frameEpoch * 100000)
+      revision: root.frameB + ":" + root.colorSchemeId + ":" + root.frameEpoch
       smooth: root.smoothTiles
       opacity: !root.showA ? 1 : 0
       onContentReadyChanged: root.applySwapWhenReady()
+      onTileFailed: function(source) { root.tileFailed(source) }
       Behavior on opacity {
         NumberAnimation { duration: 380; easing.type: Easing.InOutQuad }
       }
@@ -306,8 +326,10 @@ Item {
     Text {
       textFormat: Text.PlainText
       anchors.centerIn: parent
-      visible: root.loading
-      text: root.radarUnavailable ? "Radar unavailable" : "Loading radar…"
+      visible: root.loading || root.notice !== ""
+      text: root.loading
+        ? (root.radarUnavailable ? "Radar unavailable" : "Loading radar…")
+        : root.notice
       color: root.foreground
       font.family: Style.font.family
       font.pixelSize: Style.font.body

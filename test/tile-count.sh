@@ -13,9 +13,10 @@
 # This drives the real `ui/TileLayer.qml` under Qt through the situations the
 # panel puts it in: built before any frame, a new frame, a frame already
 # fetched, a pan, a pan back, a frame replaced in the same pass, a frame that
-# is missing, and a repoint, pan and repoint in one pass. At every step the
-# count has to equal the tiles actually loading, and it must never go below
-# zero.
+# is missing, a repoint, pan and repoint in one pass, and a frame whose tiles
+# are still on their way to the cache and then arrive. At every step the
+# count has to equal the tiles not on screen yet, loading or awaited, and it
+# must never go below zero.
 #
 # Tiles are small PNGs written to a temporary directory and loaded through
 # file:// URLs, so nothing reaches RainViewer. Needs `qml6`; skips without it,
@@ -65,9 +66,15 @@ Item {
   property int frame: -1
   property int lowest: 0
 
+  // Frame 9 stands for one the cache is still fetching: null, the layer's
+  // word for "on its way", until it arrives as a copy of frame 0.
+  property bool arrived: false
+
   function tileUrl(z, x, y) {
     if (frame < 0) return ""
-    return Qt.resolvedUrl("frames/" + frame + "/" + z + "_" + x + "_" + y + ".png")
+    if (frame === 9 && !arrived) return null
+    var source = frame === 9 ? 0 : frame
+    return Qt.resolvedUrl("frames/" + source + "/" + z + "_" + x + "_" + y + ".png")
   }
 
   TileLayer {
@@ -81,14 +88,22 @@ Item {
     onPendingTilesChanged: if (pendingTiles < harness.lowest) harness.lowest = pendingTiles
   }
 
-  // What the count is supposed to be: the tiles with a source that have not
-  // finished loading.
+  // Tiles Qt is still loading.
   function loading() {
     var n = 0
     for (var i = 0; i < layer.children.length; i++) {
       var tile = layer.children[i]
       if (tile.status === undefined) continue
       if (String(tile.source) !== "" && tile.status === Image.Loading) n++
+    }
+    return n
+  }
+
+  // What the count is supposed to be: those, plus the ones not loadable yet.
+  function outstanding() {
+    var n = loading()
+    for (var i = 0; i < layer.children.length; i++) {
+      if (layer.children[i].awaiting === true) n++
     }
     return n
   }
@@ -102,12 +117,14 @@ Item {
   }
 
   function record(label) {
-    report(label + "|" + layer.pendingTiles + "|" + loading() + "|" + layer.contentReady + "|" + tiles())
+    report(label + "|" + layer.pendingTiles + "|" + outstanding() + "|" + layer.contentReady + "|" + tiles())
   }
 
   // Each step changes the layer and records the count in the same pass, which
   // is the moment RadarMap reads it; the next step waits until nothing is
-  // loading and records the settled count first.
+  // loading and records the settled count first. Awaited tiles do not settle
+  // by waiting, which is the point of them, so they are counted but not
+  // waited for.
   property var steps: [
     ["built before any frame", function() {}],
     ["a new frame", function() { harness.frame = 0 }],
@@ -121,7 +138,9 @@ Item {
       harness.frame = 1
       layer.centerLongitude = 1.5
       harness.frame = 2
-    }]
+    }],
+    ["a frame still on its way", function() { harness.frame = 9 }],
+    ["that frame arriving", function() { harness.arrived = true }]
   ]
   property int next: 0
 
@@ -166,8 +185,8 @@ fi
 
 while IFS='|' read -r label pending loading ready count; do
   [[ -z ${count:-} ]] && continue
-  check "$label: counts the $loading of $count tiles loading" "$loading" "$pending"
-  check "$label: ready only when nothing is loading" \
+  check "$label: counts the $loading of $count tiles not on screen" "$loading" "$pending"
+  check "$label: ready only when every tile is on screen" \
     "$([[ $loading == 0 ]] && echo true || echo false)" "$ready"
 done <<< "$out"
 
