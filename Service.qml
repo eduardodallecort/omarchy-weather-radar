@@ -6,6 +6,7 @@ import "lib/Alerts.js" as Alerts
 import "lib/Basemap.js" as Basemap
 import "lib/RadarModel.js" as RadarModel
 import "lib/Settings.js" as Settings
+import "lib/TileCache.js" as TileCache
 
 // Headless singleton behind the radar plugin.
 //
@@ -13,7 +14,7 @@ import "lib/Settings.js" as Settings
 // live here instead: the shell mounts exactly one service per plugin, which
 // keeps a two-monitor setup from doubling every request.
 //
-// Two responsibilities:
+// Three responsibilities:
 //
 //   1. Own the RainViewer frame manifest, so that a two-monitor setup showing
 //      the map on both shares one copy instead of fetching one each. It is 818
@@ -22,9 +23,12 @@ import "lib/Settings.js" as Settings
 //      assigns the plugin's own manifest.json to any service exposing a
 //      property by that name.
 //
-//   2. Decide whether to warn about approaching weather, and say so once.
+//   2. Keep the loop's radar tiles on disk, so that each is fetched once
+//      rather than on every pass through the loop.
 //
-// On (2), a note on why the alert reads a point forecast rather than the radar
+//   3. Decide whether to warn about approaching weather, and say so once.
+//
+// On (3), a note on why the alert reads a point forecast rather than the radar
 // image it draws. Distance alone does not mean approaching — a cell 80 km east
 // travelling east is not your problem — so a radar-echo alert would have to
 // derive motion vectors across frames to avoid crying wolf. The question the
@@ -90,7 +94,7 @@ Item {
 
   FileView {
     id: locationFile
-    path: Quickshell.env("HOME") + "/.local/state/omarchy/settings/weather.json"
+    path: RadarModel.locationFilePath(Quickshell.env("HOME"))
     watchChanges: true
     printErrors: false
     onFileChanged: reload()
@@ -214,10 +218,64 @@ Item {
     frameConsumers++
     loadBasemap()
     refreshManifest()
+    retryFailedTiles()
+    scheduleManifestCheck()
+    // The cache is emptied while the frame list is being asked for, rather
+    // than after it answers.
+    if (tileCacheState === "cold") clearTileCache()
   }
 
-  function releaseManifest() {
+  // `owner` names the map letting go, so that its tile requests go with it.
+  function releaseManifest(owner) {
     frameConsumers = Math.max(0, frameConsumers - 1)
+    if (owner !== undefined) delete tileWants[owner]
+    // Nobody is looking, so nothing still queued is worth fetching. What is
+    // already on disk stays for the next time the map opens.
+    if (frameConsumers === 0) tileWants = ({})
+    rebuildTileQueue()
+    scheduleManifestCheck()
+  }
+
+  // While a map is open, the frame list is asked for again when the next frame
+  // should have been published, and every minute after that until it is: see
+  // RadarModel.nextManifestCheckMs. `nextManifestCheckAt` is when, or 0 when
+  // no map is open.
+  property real nextManifestCheckAt: 0
+
+  // Whether a request for the frame list is in flight. The map waits for it
+  // before asking for tiles, rather than fetching the tiles of a list that is
+  // about to be replaced, whose oldest frames may no longer be served at all.
+  readonly property bool manifestPending: manifestProc.running
+
+  function scheduleManifestCheck() {
+    if (frameConsumers === 0) {
+      manifestCheckTimer.stop()
+      nextManifestCheckAt = 0
+      return
+    }
+    var now = Date.now()
+    var delay = RadarModel.nextManifestCheckMs(latestFrameTime, now)
+    // Not before refreshManifest would agree to ask. A timer that fires a
+    // little early would otherwise be turned away by the minimum gap and put
+    // the question off by a whole extra interval.
+    if (radarManifest && lastManifestFetchMs > 0 && lastManifestFetchMs <= now) {
+      delay = Math.max(delay, lastManifestFetchMs + minFetchGapMs - now + 250)
+    }
+    nextManifestCheckAt = now + delay
+    manifestCheckTimer.interval = delay
+    manifestCheckTimer.restart()
+  }
+
+  Timer {
+    id: manifestCheckTimer
+    repeat: false
+    onTriggered: {
+      root.refreshManifest()
+      // A fetch that starts here schedules the next check when it answers;
+      // one that did not start, because the list was already current or was
+      // asked for moments ago, is scheduled from here.
+      if (!manifestProc.running) root.scheduleManifestCheck()
+    }
   }
 
   // Every request passes through here, so this is where "is it worth asking"
@@ -246,6 +304,7 @@ Item {
     lastManifestFetchMs = now
     manifestProc.answered = false
     manifestProc.command = RadarModel.manifestCommand()
+    manifestBeats = 0
     manifestProc.running = true
   }
 
@@ -262,8 +321,13 @@ Item {
     onExited: function(exitCode) {
       answered = true
       root.applyManifestResponse(exitCode, manifestOut.text)
+      root.scheduleManifestCheck()
     }
-    onRunningChanged: if (!running && !answered) root.applyManifestResponse(-1, "")
+    onRunningChanged: {
+      if (running || answered) return
+      root.applyManifestResponse(-1, "")
+      root.scheduleManifestCheck()
+    }
 
     // The collector holds the output and decides nothing. `onStreamFinished`
     // fires before `onExited`, so deciding there is deciding before the exit
@@ -285,8 +349,520 @@ Item {
       frameFailures++
       return
     }
+    // A list that arrives after lists that did not is the network coming back.
+    // Tiles that failed meanwhile are asked for again now, rather than each
+    // waiting out a backoff that grew while nothing could have worked.
+    var recovering = frameFailures > 0
     frameFailures = 0
-    radarManifest = parsed
+    if (RadarModel.isNewerManifest(radarManifest, parsed)) {
+      radarManifest = parsed
+      evictStaleTiles()
+    }
+    if (recovering) {
+      retryFailedTiles(true)
+      rebuildTileQueue()
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Radar tiles
+  // ---------------------------------------------------------------------------
+
+  // The loop's tiles, kept on disk while their frame is in it. Why disk rather
+  // than memory, and every name and command used here, are in
+  // lib/TileCache.js.
+  //
+  // Owned here for the same reason as the manifest: two monitors showing the
+  // map want the same files. Each panel says which tiles its view needs, in
+  // the order it will need them; this fetches the ones not on disk yet and
+  // answers where each one is.
+  //
+  // What is on disk is known only from this session's own fetches. The cache
+  // is emptied the first time the map opens, so a file left behind by a
+  // session that was killed mid-transfer, or by an older version of the
+  // plugin, is never taken on trust.
+  readonly property string tileCacheDir: TileCache.cacheDir(Quickshell.env("HOME"),
+    Quickshell.env("XDG_CACHE_HOME"))
+
+  // "cold" until the map first opens, "clearing" while the old cache is
+  // removed, then "ready". "off" when there is nowhere safe to keep one, in
+  // which case the panel loads each tile straight from the network.
+  property string tileCacheState: tileCacheDir === "" ? "off" : "cold"
+
+  // Bumped whenever a tile arrives, fails or leaves, so that bindings which
+  // asked where a tile is ask again. The bookkeeping itself is plain objects,
+  // which QML does not watch, so it costs nothing to update tile by tile.
+  property int tileRevision: 0
+  property var tilesOnDisk: ({})
+  property int tilesOnDiskCount: 0
+  property int maxTilesOnDisk: TileCache.MAX_TILES_ON_DISK
+  property var unreadableCounts: ({})
+  property var framesOnDisk: ({})
+  property var tilesInFlight: ({})
+  property var tileRetries: ({})
+  property var tileQueue: []
+
+  // What each open map wants, most urgent first, keyed by the map that asked.
+  // Two monitors can each show the map, looking at different places, and the
+  // queue takes a tile from each in turn so that neither waits on the other.
+  property var tileWants: ({})
+  property var wantedKeys: ({})
+  property var framesToDelete: []
+
+  // Set by a 429. RainViewer asking for less applies to every tile, not just
+  // the one that drew it, so nothing is fetched until it passes.
+  property real tilesPausedUntil: 0
+  property int rateLimitStrikes: 0
+
+  // Where a tile is, for an Image to load. A file URL once it is on disk; ""
+  // for one that failed and is waiting out its retry, which is not worth
+  // holding the loop for; null for one still coming. The map's layers count
+  // null as outstanding, which is what holds a crossfade until the frame it
+  // fades to has arrived.
+  function tileSource(key) {
+    var unused = tileRevision
+    return TileCache.tileSourceFor("file://" + tileCacheDir + "/" + key, tilesOnDisk[key] === true,
+      tileRetries[key] || null, tilesPausedUntil, Date.now())
+  }
+
+  // What the map says about a tile it wants: see TileCache.radarNotice.
+  function tileState(key) {
+    var unused = tileRevision
+    return TileCache.tileState(tilesOnDisk[key] === true, tileRetries[key] || null,
+      tilesPausedUntil, Date.now())
+  }
+
+  // The tiles one map needs, most urgent first. Replaces what that map asked
+  // for before: a view that has moved on no longer needs the tiles of the one
+  // it left.
+  function wantTiles(owner, jobs) {
+    tileWants[owner] = jobs || []
+    rebuildTileQueue()
+  }
+
+  // A failed tile keeps its backoff when no map wants it for a while, so that
+  // asking for it again, after a pan away and back, does not start it afresh.
+  // The retry timer only looks at tiles some map wants, so a backoff kept
+  // here never wakes it, and it goes when its frame leaves the loop.
+  function rebuildTileQueue() {
+    var lists = []
+    for (var owner in tileWants) lists.push(tileWants[owner])
+    var merged = TileCache.interleave(lists)
+    var wanted = {}
+    for (var i = 0; i < merged.length; i++) wanted[merged[i].key] = true
+    wantedKeys = wanted
+
+    var now = Date.now()
+    var queue = []
+    for (var j = 0; j < merged.length; j++) {
+      var k = merged[j].key
+      if (tilesOnDisk[k] || tilesInFlight[k]) continue
+      if (TileCache.isWaiting(tileRetries[k], now)) continue
+      queue.push(merged[j])
+    }
+    tileQueue = queue
+    pumpTiles()
+    scheduleTileWake()
+  }
+
+  // Opening the map is asking again, the same as it is for the manifest, so
+  // tiles that failed are no longer made to wait out their backoff: whatever
+  // stopped them, a dropped connection most likely, may be over. A 429 is the
+  // exception. That was RainViewer asking for less, and reopening the panel
+  // does not change their answer.
+  //
+  // The frame list answering after failures (`afterOutage`) is the network
+  // coming back, which says nothing about a tile that arrived and could not
+  // be read: that one keeps its count, and stays given up, until the map is
+  // opened again.
+  function retryFailedTiles(afterOutage) {
+    var changed = false
+    for (var key in tileRetries) {
+      if (tileRetries[key].status === 429) continue
+      if (afterOutage && tileRetries[key].unreadable === true) continue
+      delete tileRetries[key]
+      changed = true
+    }
+    if (!afterOutage) unreadableCounts = ({})
+    if (changed) tileRevision++
+  }
+
+  function pumpTiles() {
+    if (tileCacheState === "cold") {
+      clearTileCache()
+      return
+    }
+    if (tileCacheState !== "ready" || tileFetchProc.running || tileQueue.length === 0) return
+    if (TileCache.isHeld(tilesPausedUntil, Date.now())) return
+
+    var batch = tileQueue.slice(0, TileCache.BATCH_SIZE)
+    tileQueue = tileQueue.slice(TileCache.BATCH_SIZE)
+    var command = TileCache.fetchCommand(tileCacheDir, batch)
+    if (command.length === 0) {
+      // Nothing in it could be fetched. Its tiles are failures like any other,
+      // rather than dropped from the queue with nothing to bring them back,
+      // which would leave the map loading them for ever.
+      applyTileReport(batch, "")
+      return
+    }
+    for (var i = 0; i < batch.length; i++) tilesInFlight[batch[i].key] = true
+    tileFetchProc.jobs = batch
+    tileFetchProc.answered = false
+    tileFetchProc.command = command
+    batchBeats = 0
+    tileFetchProc.running = true
+  }
+
+  Process {
+    id: tileFetchProc
+
+    // See manifestProc: a fork that never happened is answered too, or the
+    // tiles it held stay in flight for the rest of the session.
+    property bool answered: false
+    property var jobs: []
+
+    onExited: function(exitCode) {
+      answered = true
+      root.applyTileReport(jobs, tileReport.text)
+    }
+    onRunningChanged: if (!running && !answered) root.applyTileReport(jobs, "")
+
+    // curl's report, one short line per tile, in a format and with paths this
+    // plugin chose; nothing the server sends reaches it.
+    stdout: StdioCollector { id: tileReport; waitForEnd: true }
+  }
+
+  function currentFrameTimes() {
+    var current = {}
+    for (var f = 0; f < frames.length; f++) current[frames[f].time] = true
+    return current
+  }
+
+  function applyTileReport(jobs, text) {
+    var result = TileCache.parseFetchReport(text, tileCacheDir, jobs)
+    var current = currentFrameTimes()
+
+    for (var i = 0; i < jobs.length; i++) delete tilesInFlight[jobs[i].key]
+
+    // Nowhere to write, a full disk or a directory that cannot be made: the
+    // cache is given up for the session, and the map loads tiles from the
+    // network as it would with no cache at all, rather than failing for good.
+    if (result.cannotWrite) {
+      console.warn("weather-radar: cannot write the tile cache in " + tileCacheDir
+        + "; loading tiles from the network for this session")
+      tileCacheState = "off"
+      tileQueue = []
+      tileRevision++
+      return
+    }
+
+    for (var a = 0; a < result.arrived.length; a++) {
+      var key = result.arrived[a]
+      var frame = TileCache.frameOfKey(key)
+      // The frame left the loop while its tile was on the way.
+      if (!current[frame]) {
+        framesToDelete.push(frame)
+        continue
+      }
+      if (!tilesOnDisk[key]) tilesOnDiskCount++
+      tilesOnDisk[key] = true
+      framesOnDisk[frame] = true
+      delete tileRetries[key]
+    }
+    // Written but not a tile, a redirect's body: never offered, but its frame's
+    // directory now holds a file, and is deleted with the frame.
+    for (var w = 0; w < result.written.length; w++) {
+      var writtenFrame = TileCache.frameOfKey(result.written[w])
+      if (current[writtenFrame]) framesOnDisk[writtenFrame] = true
+    }
+
+    var now = Date.now()
+    var limited = false
+    // Nothing in the batch arrived: whatever failed may have failed for want
+    // of a network rather than for anything about the tile itself.
+    var outage = result.arrived.length === 0
+    for (var b = 0; b < result.failed.length; b++) {
+      var failed = result.failed[b]
+      if (failed.status === 429) limited = true
+      // A frame that left the loop is not coming back, and neither is the
+      // need for its tiles.
+      if (!current[TileCache.frameOfKey(failed.key)]) continue
+      var attempts = (tileRetries[failed.key] ? tileRetries[failed.key].attempts : 0) + 1
+      tileRetries[failed.key] = {
+        at: now + TileCache.retryDelayMs(attempts, failed.status),
+        attempts: attempts,
+        status: failed.status,
+        outage: outage
+      }
+    }
+    // One line per batch, so that what RainViewer answered can be read back
+    // from the journal: the status of each tile that failed, a few named.
+    if (result.failed.length > 0) {
+      var named = result.failed.slice(0, 4).map(function(f) { return f.status + " " + f.key })
+      console.warn("weather-radar: " + result.failed.length + " of " + jobs.length
+        + " tiles failed: " + named.join(", ") + (result.failed.length > 4 ? ", ..." : ""))
+    }
+
+    if (limited) {
+      rateLimitStrikes++
+      tilesPausedUntil = now + TileCache.retryDelayMs(rateLimitStrikes, 429)
+    } else if (result.arrived.length > 0) {
+      rateLimitStrikes = 0
+    }
+
+    // A tile arriving is the network working. Tiles that failed in a batch
+    // where nothing answered at all are asked for again now, instead of each
+    // waiting out its own delay: the network came back, and they would all
+    // work. A tile that failed beside others that arrived keeps its delay, or
+    // one that keeps timing out would be fetched again in every batch; so
+    // does a tile that arrived and could not be read, whose record no batch
+    // wrote.
+    var revived = false
+    if (result.arrived.length > 0) {
+      for (var key2 in tileRetries) {
+        var r = tileRetries[key2]
+        if (r.status !== 0 || r.outage !== true) continue
+        delete tileRetries[key2]
+        revived = true
+      }
+    }
+
+    tileRevision++
+    if (tilesOnDiskCount > maxTilesOnDisk) {
+      startTileCacheOver()
+      return
+    }
+    runTileDeletes()
+    if (revived) rebuildTileQueue()
+    else pumpTiles()
+    scheduleTileWake()
+  }
+
+  // Wakes when the next wanted tile's retry, or a rate limit, runs out, so a
+  // five-second retry takes five seconds and not up to ten. The heartbeat
+  // does the same every five seconds, in case this is ever missed.
+  function scheduleTileWake() {
+    var now = Date.now()
+    var at = TileCache.nextWake(tileRetries, wantedKeys, tilesPausedUntil, now)
+    if (at === 0 || frameConsumers === 0) {
+      tileWakeTimer.stop()
+      tileWakeAt = 0
+      return
+    }
+    tileWakeTimer.interval = Math.max(50, at - now + 50)
+    tileWakeTimer.restart()
+    tileWakeAt = now + tileWakeTimer.interval
+  }
+
+  // When the service will next wake for a retry or a rate limit, or 0.
+  property real tileWakeAt: 0
+
+  Timer {
+    id: tileWakeTimer
+    repeat: false
+    onTriggered: root.reviveDueTiles()
+  }
+
+  // Lifts a rate limit that has run out, and queues again the wanted tiles
+  // whose retry is due.
+  function reviveDueTiles() {
+    if (tileCacheState !== "ready") return
+    var now = Date.now()
+    if (tilesPausedUntil > 0 && !TileCache.isHeld(tilesPausedUntil, now)) tilesPausedUntil = 0
+    var due = false
+    for (var key in tileRetries) {
+      var retry = tileRetries[key]
+      if (wantedKeys[key] && !retry.gaveUp && !TileCache.isHeld(retry.at, now)) { due = true; break }
+    }
+    if (!due && tilesPausedUntil === 0 && tileQueue.length > 0) {
+      pumpTiles()
+    } else if (due) {
+      // A tile whose retry is due reads as outstanding again, and is queued.
+      tileRevision++
+      rebuildTileQueue()
+    }
+    scheduleTileWake()
+  }
+
+  // Past the ceiling on tiles, the cache is emptied and refilled with what the
+  // maps on screen want, rather than growing for as long as someone explores.
+  function startTileCacheOver() {
+    tilesOnDisk = ({})
+    framesOnDisk = ({})
+    tilesOnDiskCount = 0
+    tileRevision++
+    tileCacheState = "cold"
+    rebuildTileQueue()
+  }
+
+  // How long one batch may run, the clear of the cache, and a request for the
+  // frame list, before they are stopped. curl's own limits end each of them
+  // well before this, so reaching it means something is stuck that nothing
+  // else would ever end. Measured in heartbeats since that process started
+  // (each counter is reset where its process is started), rather than by the
+  // clock, so that neither the clock moving nor a machine waking from sleep
+  // can make a healthy process look hung, or a hung one look fresh.
+  property int tileBatchTimeoutMs: 90000
+  property int tileClearTimeoutMs: 30000
+  property int manifestTimeoutMs: 30000
+  property int batchBeats: 0
+  property int clearBeats: 0
+  property int manifestBeats: 0
+
+  // The heartbeat of an open map, every five seconds. It is where everything
+  // that could otherwise wait for ever is looked at again:
+  //
+  //  - a batch, a clear or a request for the frame list that has hung is
+  //    stopped, and handled like any other failure when it ends;
+  //  - a check of the frame list that is due is made, which covers a machine
+  //    that slept through the timer meant to make it (Qt's timers do not count
+  //    time spent suspended);
+  //  - a rate limit that has run out is lifted, and failed tiles whose retry
+  //    is due are queued again. The service also wakes for these at the
+  //    moment they are due; this is the net under that.
+  Timer {
+    id: tileHeartbeat
+    interval: 5000
+    repeat: true
+    running: root.frameConsumers > 0
+    onTriggered: {
+      var beat = interval
+      if (tileFetchProc.running) root.batchBeats++
+      if (root.batchBeats * beat > root.tileBatchTimeoutMs) {
+        console.warn("weather-radar: a tile batch ran for over " + Math.round(root.tileBatchTimeoutMs / 1000)
+          + " s and was stopped")
+        root.batchBeats = 0
+        tileFetchProc.running = false
+      }
+      if (tileCleanProc.running) root.clearBeats++
+      if (root.clearBeats * beat > root.tileClearTimeoutMs) {
+        console.warn("weather-radar: clearing the tile cache hung and was stopped")
+        root.clearBeats = 0
+        tileCleanProc.running = false
+      }
+      if (manifestProc.running) root.manifestBeats++
+      if (root.manifestBeats * beat > root.manifestTimeoutMs) {
+        console.warn("weather-radar: a request for the frame list hung and was stopped")
+        root.manifestBeats = 0
+        manifestProc.running = false
+      }
+
+      var now = Date.now()
+      if (root.nextManifestCheckAt > 0 && now >= root.nextManifestCheckAt + 1000 && !manifestProc.running) {
+        root.refreshManifest()
+        if (!manifestProc.running) root.scheduleManifestCheck()
+      }
+      root.reviveDueTiles()
+    }
+  }
+
+  // Empties the cache. If a frame's directory is being deleted at that moment,
+  // the clear waits for it to finish: handed a new command while running, the
+  // process would report the old one's end as the clear's, and tiles fetched
+  // in between would be deleted under the bookkeeping that says they are there.
+  property bool clearPending: false
+
+  function clearTileCache() {
+    tileCacheState = "clearing"
+    framesToDelete = []
+    if (tileCleanProc.running) {
+      clearPending = true
+      return
+    }
+    tileCleanProc.command = TileCache.cleanCommand(tileCacheDir, null)
+    clearBeats = 0
+    tileCleanProc.running = true
+  }
+
+  // Frames that left the loop take their tiles with them: the files, the
+  // failures waiting to be retried, and anything still queued for them.
+  function evictStaleTiles() {
+    var current = currentFrameTimes()
+    for (var retry in tileRetries) {
+      if (!current[TileCache.frameOfKey(retry)]) delete tileRetries[retry]
+    }
+    for (var unreadable in unreadableCounts) {
+      if (!current[TileCache.frameOfKey(unreadable)]) delete unreadableCounts[unreadable]
+    }
+    tileQueue = tileQueue.filter(function(job) { return current[TileCache.frameOfKey(job.key)] === true })
+
+    var stale = TileCache.staleFrames(framesOnDisk, frames)
+    if (stale.length === 0) return
+    var gone = {}
+    for (var i = 0; i < stale.length; i++) {
+      gone[stale[i]] = true
+      delete framesOnDisk[stale[i]]
+    }
+    for (var key in tilesOnDisk) {
+      if (!gone[TileCache.frameOfKey(key)]) continue
+      delete tilesOnDisk[key]
+      tilesOnDiskCount--
+    }
+    framesToDelete = framesToDelete.concat(stale)
+    tileRevision++
+    runTileDeletes()
+  }
+
+  // A file the map could not load, although this session wrote it: the cache
+  // was deleted under it, or what arrived is not a readable image. Either way
+  // it is not on disk any more as far as the map is concerned. How many times
+  // a tile has come back unreadable is kept across its arrivals, so each
+  // refetch waits longer, and after a few it is left alone until the map is
+  // opened again: see TileCache.unreadableRetry.
+  function tileUnreadable(source) {
+    var prefix = "file://" + tileCacheDir + "/"
+    var text = String(source || "")
+    if (tileCacheDir === "" || text.indexOf(prefix) !== 0) return
+    var key = text.slice(prefix.length)
+    if (!TileCache.isTileKey(key) || !tilesOnDisk[key]) return
+    delete tilesOnDisk[key]
+    tilesOnDiskCount--
+    var count = (unreadableCounts[key] || 0) + 1
+    unreadableCounts[key] = count
+    tileRetries[key] = TileCache.unreadableRetry(count, Date.now())
+    tileRevision++
+  }
+
+  // A frame whose tiles a batch is still writing waits for that batch, which
+  // runs this again when it ends. Deleting the directory under curl can land
+  // between its making the directory and opening the file, and curl reports
+  // that as a write it could not make, which gives the whole cache up.
+  function runTileDeletes() {
+    if (tileCleanProc.running || framesToDelete.length === 0) return
+    var writing = {}
+    for (var key in tilesInFlight) writing[TileCache.frameOfKey(key)] = true
+    var now = framesToDelete.filter(function(frame) { return !writing[frame] })
+    framesToDelete = framesToDelete.filter(function(frame) { return writing[frame] === true })
+    if (now.length === 0) return
+    var command = TileCache.cleanCommand(tileCacheDir, now)
+    if (command.length === 0) return
+    tileCleanProc.command = command
+    clearBeats = 0
+    tileCleanProc.running = true
+  }
+
+  Process {
+    id: tileCleanProc
+
+    // Nothing is read back. A delete that failed leaves files nobody points
+    // at, and the next session's clear removes them.
+    onRunningChanged: {
+      if (running) return
+      if (root.clearPending) {
+        root.clearPending = false
+        root.clearTileCache()
+        return
+      }
+      if (root.tileCacheState === "clearing") {
+        // Whatever was asked for while the cache was being emptied is queued
+        // against what is on disk now, which is nothing.
+        root.tileCacheState = "ready"
+        root.rebuildTileQueue()
+        return
+      }
+      root.runTileDeletes()
+      root.pumpTiles()
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -647,14 +1223,33 @@ Item {
   property var storedLatch: null
   property bool latchEvaluatePending: false
 
+  // A machine can have nowhere to keep it (no home), or refuse to (a state
+  // directory that is read-only, a full disk). Neither stops an alert: the
+  // latch is held in memory, and the only cost is that a reload of the
+  // service could announce a storm again. A write that fails is said once.
+  readonly property string latchPath: Alerts.latchFilePath(Quickshell.env("HOME"))
+  property bool latchWriteFailed: false
+
   FileView {
     id: latchFile
-    path: Quickshell.env("HOME") + "/.local/state/omarchy/weather-radar-alert.json"
+    path: root.latchPath
     atomicWrites: true
     printErrors: false
     onLoaded: root.receiveLatch(text())
     onLoadFailed: root.receiveLatch("")
+    onSaved: root.latchWriteFailed = false
+    onSaveFailed: {
+      if (!root.latchWriteFailed) {
+        console.warn("weather-radar: cannot write " + root.latchPath
+          + "; storm alerts still work, but a reload of the plugin may repeat one")
+      }
+      root.latchWriteFailed = true
+    }
   }
+
+  // A FileView with no path neither loads nor fails, and deciding an alert
+  // waits for the latch to be read, so with no file it is read as empty now.
+  Component.onCompleted: if (latchPath === "") receiveLatch("")
 
   function receiveLatch(text) {
     var record = null
@@ -688,7 +1283,7 @@ Item {
 
   function storeLatch(level) {
     storedLatch = Alerts.latchRecord(level, latchPlaceKey, Date.now())
-    latchFile.setText(JSON.stringify(storedLatch || { level: 0 }) + "\n")
+    if (latchPath !== "") latchFile.setText(JSON.stringify(storedLatch || { level: 0 }) + "\n")
   }
 
   function evaluateAlert() {
@@ -755,31 +1350,22 @@ Item {
   readonly property int baseIntervalMs: RadarModel.FRAME_INTERVAL_SEC * 1000
   readonly property int backoffMultiplier: Math.min(6, Math.pow(2, Math.min(consecutiveFailures, 3)))
 
-  // Two things want this cadence, and either one on its own is reason enough to
-  // run: the alert check, which needs a location, and the map, which needs to
-  // be open.
+  // The alert check's cadence. The map's frame list is not asked for here: it
+  // has its own schedule, timed from the newest frame (scheduleManifestCheck).
   //
   // The backoff belongs to the alert check alone, because only the forecast can
-  // raise it, and it stands down while the map is open. Nothing about
-  // api.open-meteo.com refusing — a rate limit, a bad DNS answer, an outage of
-  // that one host — says anything about RainViewer, and stretching the map's
-  // cadence to an hour on that evidence would freeze the picture in front of
-  // someone who is watching it. With nobody watching, an hour between attempts
-  // is the right courtesy to a service having a bad day.
+  // raise it, and it stands down while the map is open, where the alert's line
+  // is on screen and someone is looking at it. With nobody watching, an hour
+  // between attempts is the right courtesy to a service having a bad day.
   Timer {
     id: pollTimer
     readonly property bool alerting: root.alertsEnabled && root.hasLocation
     readonly property bool watched: root.frameConsumers > 0
     interval: root.baseIntervalMs * (alerting && !watched ? root.backoffMultiplier : 1)
     repeat: true
-    running: alerting || watched
+    running: alerting
     triggeredOnStart: true
-    onTriggered: {
-      if (alerting) root.checkNow()
-      // Frames serve the map and nothing else, so a closed map is not a reason
-      // to fetch them — including for the alert, which reads the forecast.
-      if (watched) root.refreshManifest()
-    }
+    onTriggered: root.checkNow()
   }
 
   // Changing the threshold or the radius is as deliberate as flipping the

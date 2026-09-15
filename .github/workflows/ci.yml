@@ -50,8 +50,10 @@ jobs:
     container: archlinux:latest
     steps:
       # `extra`, not the AUR, so this is one package and no build. python is
+      # for the fake RainViewer and the tiles it serves (test/harness.sh) and
       # for the listener in test/text-format.sh; qml6 arrives with Quickshell's
-      # own dependency on qt6-declarative.
+      # own dependency on qt6-declarative. The job runs as root, which the
+      # tests allow for.
       - name: Install Quickshell
         run: pacman -Syu --noconfirm --needed quickshell git python
 
@@ -64,14 +66,11 @@ jobs:
       - name: A machine that has never set a weather location
         env:
           QT_QPA_PLATFORM: offscreen
-          XDG_RUNTIME_DIR: /tmp/runtime
           # The script skips when there is no `qs`, which is right for someone
           # running the suite on a machine without Quickshell and wrong here:
           # it would report success for a check it never ran.
           RADAR_REQUIRE_QS: "1"
-        run: |
-          mkdir -p /tmp/runtime
-          ./test/first-run.sh
+        run: ./test/first-run.sh
 
       # The ground is decoded on the thread that draws the shell, in steps. This
       # watches that thread while the real service decodes the shipped file,
@@ -80,7 +79,6 @@ jobs:
       - name: Decoding the ground never stalls the shell
         env:
           QT_QPA_PLATFORM: offscreen
-          XDG_RUNTIME_DIR: /tmp/runtime
           RADAR_REQUIRE_QS: "1"
         run: ./test/basemap-steps.sh
 
@@ -96,6 +94,50 @@ jobs:
           RADAR_REQUIRE_QS: "1"
         run: ./test/tile-count.sh
 
+      # The loop's tiles are kept on disk so that each is fetched once, which is
+      # the whole reason the cache exists, so the claim is counted: the service
+      # runs against a fake RainViewer that logs every URL, is asked for the
+      # whole loop again, and must have fetched each tile exactly once.
+      - name: Each radar tile is fetched once, however long the loop plays
+        env:
+          QT_QPA_PLATFORM: offscreen
+          RADAR_REQUIRE_QS: "1"
+        run: ./test/tile-cache.sh
+
+      # A 429, a timeout, and one that repeats: what is waited for, what is
+      # retried and when, and what the map says about each.
+      - name: Failing tiles are retried, and the map says why
+        env:
+          QT_QPA_PLATFORM: offscreen
+          RADAR_REQUIRE_QS: "1"
+        run: ./test/tile-failures.sh
+
+      # A tile deleted from under the map, one that keeps arriving unreadable,
+      # and the ceiling on tiles.
+      - name: The tile cache keeps to its limits
+        env:
+          QT_QPA_PLATFORM: offscreen
+          RADAR_REQUIRE_QS: "1"
+        run: ./test/tile-limits.sh
+
+      # The ways the radar could get stuck and stay stuck until the shell was
+      # restarted: a batch that cannot be fetched, a batch that hangs, a check
+      # of the frame list missed while the machine slept, and the network
+      # coming back. Each must recover on its own.
+      - name: The radar recovers on its own
+        env:
+          QT_QPA_PLATFORM: offscreen
+          RADAR_REQUIRE_QS: "1"
+        run: ./test/tile-recovery.sh
+
+      # A plugin runs on other people's machines. A read-only state directory
+      # or no home at all must not stop the radar or the storm alert.
+      - name: Restricted environments do not stop the radar or the alert
+        env:
+          QT_QPA_PLATFORM: offscreen
+          RADAR_REQUIRE_QS: "1"
+        run: ./test/restricted-env.sh
+
       # test/qml-source.test.js establishes that every Text declares
       # Text.PlainText and that the notification body makes the place name
       # inert. That is source inspection. This renders those strings under Qt
@@ -106,14 +148,12 @@ jobs:
       - name: A forecast answers the question that was asked
         env:
           QT_QPA_PLATFORM: offscreen
-          XDG_RUNTIME_DIR: /tmp/runtime
           RADAR_REQUIRE_QS: "1"
         run: ./test/stale-forecast.sh
 
       - name: A place name cannot make the shell fetch a URL
         env:
           QT_QPA_PLATFORM: offscreen
-          XDG_RUNTIME_DIR: /tmp/runtime
           RADAR_REQUIRE_QS: "1"
         run: ./test/text-format.sh
 

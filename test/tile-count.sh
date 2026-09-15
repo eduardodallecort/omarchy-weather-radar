@@ -13,42 +13,17 @@
 # This drives the real `ui/TileLayer.qml` under Qt through the situations the
 # panel puts it in: built before any frame, a new frame, a frame already
 # fetched, a pan, a pan back, a frame replaced in the same pass, a frame that
-# is missing, and a repoint, pan and repoint in one pass. At every step the
-# count has to equal the tiles actually loading, and it must never go below
-# zero.
+# is missing, a repoint, pan and repoint in one pass, and a frame whose tiles
+# are still on their way to the cache and then arrive. At every step the
+# count has to equal the tiles not on screen yet, loading or awaited, and it
+# must never go below zero.
 #
 # Tiles are small PNGs written to a temporary directory and loaded through
 # file:// URLs, so nothing reaches RainViewer. Needs `qml6`; skips without it,
 # and RADAR_REQUIRE_QS turns the skip into a failure, which is what CI sets.
 
-set -uo pipefail
-
-cd "$(dirname "$0")/.."
-plugin=$PWD
-
-qml=$(command -v qml6 || command -v /usr/lib/qt6/bin/qml || true)
-if [[ -z $qml ]]; then
-  if [[ -n ${RADAR_REQUIRE_QS:-} ]]; then
-    echo "RADAR_REQUIRE_QS is set and there is no qml6 on PATH" >&2
-    exit 1
-  fi
-  echo "no qml6 on PATH; skipping (set RADAR_REQUIRE_QS to make this fatal)"
-  exit 0
-fi
-
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
-
-failures=0
-check() {
-  local label=$1 expected=$2 actual=$3
-  if [[ $expected == "$actual" ]]; then
-    printf '  ok    %s\n' "$label"
-  else
-    printf '  FAIL  %s (expected %s, got %s)\n' "$label" "$expected" "$actual"
-    failures=$((failures + 1))
-  fi
-}
+source "$(dirname "$0")/harness.sh"
+require qml6 python3
 
 # The layer imports its projection by relative path, so the tree is staged
 # the way the plugin lays it out.
@@ -91,9 +66,15 @@ Item {
   property int frame: -1
   property int lowest: 0
 
+  // Frame 9 stands for one the cache is still fetching: null, the layer's
+  // word for "on its way", until it arrives as a copy of frame 0.
+  property bool arrived: false
+
   function tileUrl(z, x, y) {
     if (frame < 0) return ""
-    return Qt.resolvedUrl("frames/" + frame + "/" + z + "_" + x + "_" + y + ".png")
+    if (frame === 9 && !arrived) return null
+    var source = frame === 9 ? 0 : frame
+    return Qt.resolvedUrl("frames/" + source + "/" + z + "_" + x + "_" + y + ".png")
   }
 
   TileLayer {
@@ -107,14 +88,22 @@ Item {
     onPendingTilesChanged: if (pendingTiles < harness.lowest) harness.lowest = pendingTiles
   }
 
-  // What the count is supposed to be: the tiles with a source that have not
-  // finished loading.
+  // Tiles Qt is still loading.
   function loading() {
     var n = 0
     for (var i = 0; i < layer.children.length; i++) {
       var tile = layer.children[i]
       if (tile.status === undefined) continue
       if (String(tile.source) !== "" && tile.status === Image.Loading) n++
+    }
+    return n
+  }
+
+  // What the count is supposed to be: those, plus the ones not loadable yet.
+  function outstanding() {
+    var n = loading()
+    for (var i = 0; i < layer.children.length; i++) {
+      if (layer.children[i].awaiting === true) n++
     }
     return n
   }
@@ -128,12 +117,14 @@ Item {
   }
 
   function record(label) {
-    report(label + "|" + layer.pendingTiles + "|" + loading() + "|" + layer.contentReady + "|" + tiles())
+    report(label + "|" + layer.pendingTiles + "|" + outstanding() + "|" + layer.contentReady + "|" + tiles())
   }
 
   // Each step changes the layer and records the count in the same pass, which
   // is the moment RadarMap reads it; the next step waits until nothing is
-  // loading and records the settled count first.
+  // loading and records the settled count first. Awaited tiles do not settle
+  // by waiting, which is the point of them, so they are counted but not
+  // waited for.
   property var steps: [
     ["built before any frame", function() {}],
     ["a new frame", function() { harness.frame = 0 }],
@@ -147,7 +138,9 @@ Item {
       harness.frame = 1
       layer.centerLongitude = 1.5
       harness.frame = 2
-    }]
+    }],
+    ["a frame still on its way", function() { harness.frame = 9 }],
+    ["that frame arriving", function() { harness.arrived = true }]
   ]
   property int next: 0
 
@@ -182,7 +175,7 @@ PROBE
 # Offscreen unconditionally: a desktop session sets QT_QPA_PLATFORM to
 # wayland, and the probe would open a real window over whatever is there.
 out=$(cd "$work" && QT_QPA_PLATFORM=offscreen QT_FORCE_STDERR_LOGGING=1 \
-      timeout 90 "$qml" probe.qml 2>&1 | sed -n 's/.*PROBE //p')
+      timeout 90 qml6 probe.qml 2>&1 | sed -n 's/.*PROBE //p')
 
 if ! printf '%s\n' "$out" | grep -qx done; then
   echo "  FAIL  the probe did not finish" >&2
@@ -192,17 +185,12 @@ fi
 
 while IFS='|' read -r label pending loading ready count; do
   [[ -z ${count:-} ]] && continue
-  check "$label: counts the $loading of $count tiles loading" "$loading" "$pending"
-  check "$label: ready only when nothing is loading" \
+  check "$label: counts the $loading of $count tiles not on screen" "$loading" "$pending"
+  check "$label: ready only when every tile is on screen" \
     "$([[ $loading == 0 ]] && echo true || echo false)" "$ready"
 done <<< "$out"
 
 lowest=$(printf '%s\n' "$out" | sed -n 's/^lowest|//p')
 check "the count never goes below zero" "0" "$lowest"
 
-echo
-if (( failures > 0 )); then
-  echo "tile count: $failures check(s) failed"
-  exit 1
-fi
-echo "tile count: all checks passed"
+finish "tile count"

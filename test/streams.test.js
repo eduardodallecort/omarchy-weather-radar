@@ -2,7 +2,7 @@ const { test } = require("node:test")
 const assert = require("node:assert")
 const { readFileSync, readdirSync } = require("node:fs")
 const { join } = require("node:path")
-const { RadarModel } = require("./load.js")
+const { RadarModel, TileCache } = require("./load.js")
 
 // Every stream that reaches the shell process, pinned by name.
 //
@@ -21,12 +21,17 @@ const source = Object.fromEntries(QML.map(name => [name, readFileSync(join(ROOT,
 const everything = Object.values(source).join("\n")
 
 // `collects` means the output is read back into this process. `builder` names
-// the RadarModel function that constructs the command, which is where the
+// the library function that constructs the command, which is where the
 // ceilings live.
 const PROCESSES = [
   { id: "manifestProc", file: "Service.qml", collects: true, builder: "manifestCommand" },
   { id: "forecastProc", file: "Service.qml", collects: true, builder: "forecastCommand" },
   { id: "notifyProc", file: "Service.qml", collects: false, builder: null },
+  // The radar tiles go to disk, not into the process. What is collected is
+  // curl's own report, a line per tile in a format and with paths this plugin
+  // chose, so its size is set here rather than by the server.
+  { id: "tileFetchProc", file: "Service.qml", collects: true, builder: "TileCache.fetchCommand" },
+  { id: "tileCleanProc", file: "Service.qml", collects: false, builder: "TileCache.cleanCommand" },
   { id: "geocodeProc", file: "Panel.qml", collects: true, builder: "geocodingCommand" },
   { id: "locationSaveProc", file: "Panel.qml", collects: false, builder: null },
 ]
@@ -95,12 +100,31 @@ test("every request carries a ceiling on bytes as well as on time", () => {
     assert.ok(command.includes("--max-time"), `${name} has no time limit`)
     assert.ok(command.includes("--max-filesize"), `${name} has no size limit`)
     assert.ok(command.includes("-fsS"), `${name} would parse an error page as data`)
+    // Parts of these URLs come from outside, and curl would otherwise read
+    // brackets or braces in them as a list of URLs to fetch.
+    assert.ok(command.includes("--globoff"), `${name} lets curl expand the URL`)
 
     const bytes = Number(command[command.indexOf("--max-filesize") + 1])
     const seconds = Number(command[command.indexOf("--max-time") + 1])
     assert.ok(bytes > 0 && bytes <= 1024 * 1024, `${name} caps at ${bytes} bytes`)
     assert.ok(seconds > 0 && seconds <= 30, `${name} waits up to ${seconds}s`)
   }
+})
+
+test("the tile fetch carries the same two ceilings, and keeps only whole tiles", () => {
+  const dir = "/home/someone/.cache/omarchy/plugins/eduardodallecort.weather-radar/tiles"
+  const command = TileCache.fetchCommand(dir, [
+    { key: "1789000000/7/1/2/2_1_0.png", url: "https://tilecache.rainviewer.com/x.png" }])
+  assert.strictEqual(command[0], "curl")
+  assert.ok(command.includes("--max-time"), "no time limit")
+  assert.ok(command.includes("--max-filesize"), "no size limit")
+  assert.ok(command.includes("-fs"), "an error page would be saved as a tile")
+  assert.ok(command.includes("--remove-on-error"), "a cut transfer would leave part of a tile")
+  assert.ok(command.includes("--globoff"), "curl would expand the URL into more of them")
+  const bytes = Number(command[command.indexOf("--max-filesize") + 1])
+  const seconds = Number(command[command.indexOf("--max-time") + 1])
+  assert.ok(bytes > 0 && bytes <= 1024 * 1024, `caps at ${bytes} bytes`)
+  assert.ok(seconds > 0 && seconds <= 30, `waits up to ${seconds}s`)
 })
 
 test("the ceilings leave room above what the endpoints actually return", () => {

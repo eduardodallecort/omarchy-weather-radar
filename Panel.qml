@@ -9,6 +9,7 @@ import "lib/Frames.js" as Frames
 import "lib/Settings.js" as Settings
 import "lib/TileMath.js" as TileMath
 import "lib/RadarModel.js" as RadarModel
+import "lib/TileCache.js" as TileCache
 
 // The radar panel.
 //
@@ -390,45 +391,103 @@ Panel {
       recordShownFrame()
     }
 
-    if (frameA < 0) { frameA = frameIndex; frontIsA = true }
+    if (frameA === 0 && frameIndex >= 0) { frameA = frames[frameIndex].time; frontIsA = true }
   }
 
   // Crossfade state. Two radar layers alternate: the incoming frame is loaded
   // into whichever is currently behind, then the two swap opacity. Hard-cutting
   // between frames reads as a flicker, because consecutive radar frames differ
   // enough that the eye registers the swap rather than the motion.
-  property int frameA: -1
-  property int frameB: -1
+  //
+  // Each layer holds the moment of the frame it shows, 0 for none, and not its
+  // position in the list. A new list is the old one shifted by a frame, and a
+  // layer holding a position would switch to the frame beside it the moment
+  // the list arrived, on screen and with no crossfade, before that frame's
+  // tiles were even there.
+  property real frameA: 0
+  property real frameB: 0
   property bool frontIsA: true
 
   onFrameIndexChanged: {
     showFrame(frameIndex)
     recordShownFrame()
+    nearTileTimer.restart()
   }
 
   function showFrame(index) {
-    if (index < 0 || frames.length === 0) return
-    if (frontIsA) frameB = index
-    else frameA = index
+    if (index < 0 || index >= frames.length) return
+    var time = frames[index].time
+    // A swap still waiting for its tiles: the new frame replaces the one it
+    // was waiting for, in the same incoming layer, instead of going into the
+    // layer on screen.
+    if (mapView.swapPending) {
+      if (frontIsA) frameA = time
+      else frameB = time
+      return
+    }
+    if (frontIsA) frameB = time
+    else frameA = time
     frontIsA = !frontIsA
   }
 
-  function radarTileUrlForFrame(index, z, x, y) {
+  // Where a layer loads one tile from: the service's copy on disk, or null
+  // while it is still on the way. Straight from the network only when there
+  // is nowhere safe to keep a cache.
+  function radarTileUrlForTime(time, z, x, y) {
     if (!root.radar || !root.radar.tileHost) return ""
-    if (index < 0 || index >= root.frames.length) return ""
-    return RadarModel.tileUrl(root.radar.tileHost, root.frames[index].path, 256,
-      z, x, y, root.colorSchemeId, root.smoothTiles, root.showSnow)
+    var index = Frames.indexOfTime(root.frames, time)
+    if (index < 0) return ""
+    var frame = root.frames[index]
+    if (root.radar.tileCacheState === "off") {
+      return RadarModel.tileUrl(root.radar.tileHost, frame.path, 256,
+        z, x, y, root.colorSchemeId, root.smoothTiles, root.showSnow)
+    }
+    var key = TileCache.tileKey(frame.time, z, x, y, root.colorSchemeId, root.smoothTiles, root.showSnow)
+    return key === "" ? "" : root.radar.tileSource(key)
   }
 
   Timer {
     id: playbackTimer
     // Slow enough to read the motion rather than watch a strobe, with a longer
     // hold on the newest frame so the loop ends on the picture that matters
-    // and the restart is legible as a restart.
-    interval: root.isLatestFrame ? 1500 : 550
+    // and the restart is legible as a restart. While it is waiting on the next
+    // frame's tiles it checks often, so it moves on as soon as they are in.
+    interval: root.playbackHeldSince > 0 ? 100 : (root.isLatestFrame ? 1500 : 550)
     repeat: true
     running: root.playing && root.opened && root.frames.length > 1
-    onTriggered: root.frameIndex = Frames.nextIndex(root.frames, root.frameIndex)
+    onTriggered: {
+      var next = Frames.nextIndex(root.frames, root.frameIndex)
+      var now = Date.now()
+      if (!root.frameTilesReady(next)) {
+        // A clock that moved backwards restarts the wait rather than making
+        // it last until the clock catches up.
+        if (root.playbackHeldSince === 0 || root.playbackHeldSince > now) root.playbackHeldSince = now
+        if (now - root.playbackHeldSince < TileCache.PLAYBACK_HOLD_MAX_MS) return
+      }
+      root.playbackHeldSince = 0
+      root.frameIndex = next
+    }
+  }
+
+  // When the loop started waiting on the next frame's tiles, or 0 when it is
+  // not waiting. See TileCache.frameReady.
+  property real playbackHeldSince: 0
+
+  // Whether the tiles of a frame in view are all in, or failing and not worth
+  // waiting for. Not while the cache is being emptied, which it is refilled
+  // after. Always, when there is no cache to ask, since then nothing can tell.
+  function frameTilesReady(index) {
+    if (!radar || radar.tileCacheState === "off") return true
+    if (radar.tileCacheState !== "ready") return false
+    if (index < 0 || index >= frames.length) return true
+    var frame = frames[index]
+    var states = []
+    for (var i = 0; i < viewTiles.length; i++) {
+      var key = TileCache.tileKey(frame.time, radarSourceZoom, viewTiles[i].x, viewTiles[i].y,
+        colorSchemeId, smoothTiles, showSnow)
+      if (key !== "") states.push(radar.tileState(key))
+    }
+    return TileCache.frameReady(states)
   }
 
   // ---------------------------------------------------------------------------
@@ -455,7 +514,7 @@ Panel {
     root.playing = false
     if (root.editingLocation) root.cancelEditingLocation()
     if (root.radar && root.manifestHeld) {
-      root.radar.releaseManifest()
+      root.radar.releaseManifest(root.tileOwner)
       root.manifestHeld = false
     }
     root.controller.hide()
@@ -474,7 +533,7 @@ Panel {
   // this the refcount never comes back down and the service keeps fetching
   // frames for a panel nobody has.
   Component.onDestruction: {
-    if (manifestHeld && root.radar && root.radar.releaseManifest) root.radar.releaseManifest()
+    if (manifestHeld && root.radar && root.radar.releaseManifest) root.radar.releaseManifest(root.tileOwner)
   }
 
   function onOpened() {
@@ -501,10 +560,9 @@ Panel {
     // was closed.
     if (root.radar && root.radar.refreshIfStale) root.radar.refreshIfStale()
 
-    // Ask the tile layers to fetch again. Qt never retries an Image that
-    // failed, and the frame list can be current while the tiles under it were
-    // requested during an outage. Anything already held is served from the
-    // cache, so this costs a request only for what is actually missing.
+    // Every tile asks again where it is to be loaded from. Opening the map
+    // retries the tiles that failed while it was closed (see the service's
+    // retryFailedTiles), and the layers have to notice.
     frameEpoch++
     // The canvas can only read pixels while it is on screen, so opening is
     // the moment to ask.
@@ -548,8 +606,114 @@ Panel {
   // of step with where the data actually comes from.
   readonly property string attribution: "RainViewer · Natural Earth"
 
-  function radarTileUrlA(z, x, y) { return root.radarTileUrlForFrame(root.frameA, z, x, y) }
-  function radarTileUrlB(z, x, y) { return root.radarTileUrlForFrame(root.frameB, z, x, y) }
+  function radarTileUrlA(z, x, y) { return root.radarTileUrlForTime(root.frameA, z, x, y) }
+  function radarTileUrlB(z, x, y) { return root.radarTileUrlForTime(root.frameB, z, x, y) }
+
+  // The radar tiles covering the view, at the zoom the radar is fetched at.
+  readonly property var viewTiles: {
+    var scale = Math.pow(2, zoom - radarSourceZoom)
+    return TileCache.viewTiles(viewLatitude, viewLongitude, radarSourceZoom,
+      mapView.width / scale, mapHeight / scale)
+  }
+
+  // Which of this map's requests are its own, for the service that shares one
+  // queue between the maps on every monitor.
+  readonly property string tileOwner: String(root)
+
+  // Tells the service which tiles to fetch for what is on screen. The frame
+  // shown and the one after it are asked for as soon as the view stops
+  // moving, which is all a paused map or one scrubbed by hand needs. The rest
+  // of the loop only while it plays, and only once the view has stayed put
+  // for a second: someone dragging across a country stops many times on the
+  // way, and fetching thirteen frames at every stop would be most of what the
+  // plugin ever asks RainViewer for.
+  readonly property string loopTileView: [
+    opened, frameEpoch, radar ? radar.tileHost : "", radar ? radar.tileCacheState : "",
+    viewLatitude.toFixed(5), viewLongitude.toFixed(5), zoom, radarSourceZoom,
+    mapView.width, mapHeight, colorSchemeId, smoothTiles, showSnow
+  ].join("|")
+  property bool loopTilesSettled: false
+  onLoopTileViewChanged: {
+    loopTilesSettled = false
+    nearTileTimer.restart()
+    wholeLoopTimer.restart()
+  }
+
+  Timer {
+    id: nearTileTimer
+    interval: 80
+    onTriggered: root.requestLoopTiles()
+  }
+
+  Timer {
+    id: wholeLoopTimer
+    interval: 1000
+    onTriggered: {
+      root.loopTilesSettled = true
+      root.requestLoopTiles()
+    }
+  }
+
+  // From the frame on screen onwards, so that a playing loop meets tiles that
+  // have already arrived. Asked again as the frame moves, which reorders the
+  // same request rather than adding to it.
+  onPlayingChanged: {
+    playbackHeldSince = 0
+    nearTileTimer.restart()
+  }
+
+  // What the map shows of that. Loading is said only once it has lasted a
+  // moment: most tiles arrive within a fraction of a second of a pan, and a
+  // line that flashed up at every drag would be noise. A failure is said at
+  // once.
+  property string shownNotice: ""
+  onRadarNoticeChanged: {
+    if (radarNotice === TileCache.NOTICE_LOADING && shownNotice === "") {
+      loadingNoticeDelay.restart()
+    } else {
+      loadingNoticeDelay.stop()
+      shownNotice = radarNotice
+    }
+  }
+  Timer {
+    id: loadingNoticeDelay
+    interval: 400
+    onTriggered: root.shownNotice = root.radarNotice
+  }
+
+  // Tiles are asked for once a request for the frame list in flight has
+  // answered: see the service's manifestPending.
+  readonly property bool manifestPending: radar ? radar.manifestPending === true : false
+  onManifestPendingChanged: if (!manifestPending) nearTileTimer.restart()
+
+  function requestLoopTiles() {
+    if (!root.radar || !root.opened || root.radar.tileCacheState === "off") return
+    if (root.manifestPending) return
+    var whole = root.loopTilesSettled && root.playing
+    var count = whole ? root.frames.length : Math.min(2, root.frames.length)
+    root.radar.wantTiles(root.tileOwner, TileCache.loopJobs(root.radar.tileHost, root.frames,
+      root.frameIndex, root.viewTiles, root.radarSourceZoom, root.colorSchemeId,
+      root.smoothTiles, root.showSnow, count))
+  }
+
+  // What the map says about the frame on screen: loading while its tiles are
+  // arriving or the cache is being emptied, and why when they cannot be got,
+  // RainViewer limiting requests or anything else failing. Nothing once they
+  // are all on disk; see TileCache.radarNotice.
+  readonly property string radarNotice: {
+    if (!radar || !opened || radar.tileCacheState === "off") return ""
+    if (frameIndex < 0 || frameIndex >= frames.length) return ""
+    if (radar.tileCacheState !== "ready") return TileCache.NOTICE_LOADING
+    var unused = radar.tileRevision + radar.tilesPausedUntil
+    var frame = frames[frameIndex]
+    var states = []
+    for (var i = 0; i < viewTiles.length; i++) {
+      var key = TileCache.tileKey(frame.time, radarSourceZoom, viewTiles[i].x, viewTiles[i].y,
+        colorSchemeId, smoothTiles, showSnow)
+      if (key !== "") states.push(radar.tileState(key))
+    }
+    return TileCache.radarNotice(states)
+  }
 
   // ---------------------------------------------------------------------------
   // Radar coverage
@@ -625,6 +789,7 @@ Panel {
         spacing: Style.space(10)
 
         RadarMap {
+          id: mapView
           width: parent.width
           height: root.mapHeight
           bar: root.bar
@@ -653,6 +818,10 @@ Panel {
 
           loading: root.frames.length === 0
           radarUnavailable: root.radar ? root.radar.frameFailures > 0 : false
+          notice: root.shownNotice
+          onTileFailed: function(source) {
+            if (root.radar && root.radar.tileUnreadable) root.radar.tileUnreadable(source)
+          }
           attribution: root.attribution
 
           onDragged: function(latitude, longitude) {

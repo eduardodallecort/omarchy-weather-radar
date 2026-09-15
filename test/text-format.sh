@@ -29,38 +29,9 @@
 # for the listener. Skips without them unless RADAR_REQUIRE_QS is set, which is
 # how CI turns the skip into a failure.
 
-set -uo pipefail
-
-cd "$(dirname "$0")/.."
-
-require() {
-  command -v "$1" > /dev/null 2>&1 && return 0
-  if [[ -n ${RADAR_REQUIRE_QS:-} ]]; then
-    echo "RADAR_REQUIRE_QS is set and there is no $1 on PATH" >&2
-    exit 1
-  fi
-  echo "no $1 on PATH; skipping (set RADAR_REQUIRE_QS to make this fatal)"
-  exit 0
-}
-
-require qml6
-require python3
-
-work=$(mktemp -d)
-trap 'rm -rf "$work"; kill %1 2> /dev/null' EXIT
-
-pass=0
-fail=0
-
-check() {
-  if [[ $2 == "$3" ]]; then
-    pass=$((pass + 1))
-    printf '  ok    %s\n' "$1"
-  else
-    fail=$((fail + 1))
-    printf '  FAIL  %s\n          wanted: %s\n          got:    %s\n' "$1" "$3" "$2" >&2
-  fi
-}
+source "$(dirname "$0")/harness.sh"
+require qml6 python3
+on_exit='kill %1 2> /dev/null'
 
 # ------------------------------------------------------------- the listener
 #
@@ -169,16 +140,15 @@ fi
 check "a default Text fetches the URL in a hostile place name" "yes" "yes"
 
 fetched PLAINTEXT && got=fetched || got=silent
-check "Text.PlainText does not fetch" "$got" "silent"
+check "Text.PlainText does not fetch" "silent" "$got"
 
 # Not a failure: the reason the next check exists. Asserted rather than
 # ignored, so that a Qt release which stops fetching here is noticed as a
 # change in the ground this plugin stands on rather than passing silently.
 fetched STYLED && got=fetched || got=silent
-check "Text.StyledText fetches, which is the mode the notification card uses" "$got" "fetched"
+check "Text.StyledText fetches, which is the mode the notification card uses" "fetched" "$got"
 
 fetched INERT && got=fetched || got=silent
-check "an inert place name does not fetch, even at StyledText" "$got" "silent"
+check "an inert place name does not fetch, even at StyledText" "silent" "$got"
 
-echo "$pass passed, $fail failed"
-[[ $fail -eq 0 ]]
+finish "text format"

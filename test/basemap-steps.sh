@@ -20,47 +20,22 @@
 # polling finds nothing to talk to. Needs `qs`; skips without it, and
 # RADAR_REQUIRE_QS turns the skip into a failure, which is what CI sets.
 
-set -uo pipefail
-
-cd "$(dirname "$0")/.."
-plugin=$PWD
-
-if ! command -v qs > /dev/null 2>&1; then
-  if [[ -n ${RADAR_REQUIRE_QS:-} ]]; then
-    echo "RADAR_REQUIRE_QS is set and there is no qs on PATH" >&2
-    exit 1
-  fi
-  echo "no qs on PATH; skipping (set RADAR_REQUIRE_QS to make this fatal)"
-  exit 0
-fi
-
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
-
-home=$work/home
-mkdir -p "$home" "$work/bin" "$work/plugin" "$work/runtime"
-
-failures=0
-check() {
-  local label=$1 expected=$2 actual=$3
-  if [[ $expected == "$actual" ]]; then
-    printf '  ok    %s\n' "$label"
-  else
-    printf '  FAIL  %s (expected %s, got %s)\n' "$label" "$expected" "$actual"
-    failures=$((failures + 1))
-  fi
-}
+source "$(dirname "$0")/harness.sh"
+require qs
 
 # Nothing outside answers. The service treats that as any other outage.
-printf '#!/usr/bin/env bash\nexit 22\n' > "$work/bin/curl"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$work/bin/omarchy-weather-location"
-chmod +x "$work/bin/curl" "$work/bin/omarchy-weather-location"
+fake curl <<'FAKE'
+#!/usr/bin/env bash
+exit 22
+FAKE
+fake omarchy-weather-location <<'FAKE'
+#!/usr/bin/env bash
+exit 0
+FAKE
 
 # `qs -p` refuses to load anything above the config file's directory, so the
 # real files are staged beside the probe.
-cp "$plugin/Service.qml" "$work/plugin/"
-cp -r "$plugin/lib" "$work/plugin/"
-mkdir -p "$work/plugin/data" && cp "$plugin/data/basemap.bin" "$work/plugin/data/"
+stage_service --basemap
 
 cat > "$work/plugin/probe.qml" <<'PROBE'
 import QtQuick
@@ -142,11 +117,7 @@ ShellRoot {
 }
 PROBE
 
-out=$(env HOME="$home" PATH="$work/bin:$PATH" \
-      QT_QPA_PLATFORM=offscreen XDG_RUNTIME_DIR="$work/runtime" \
-      timeout 150 qs -p "$work/plugin/probe.qml" 2>&1 | sed -n 's/.*PROBE //p')
-
-value() { printf '%s\n' "$out" | sed -n "s/^$1=//p" | tail -1; }
+run_qs 150 HOME="$home"
 
 if [[ $(value loaded) != "yes" ]]; then
   echo "  FAIL  Service.qml did not decode the basemap under Quickshell" >&2
@@ -173,8 +144,4 @@ echo
 printf 'decoded in %s ms of wall time; longest stall %s ms; arrivals at %s layers\n' \
   "$(value elapsed-ms)" "$gap" "$arrivals"
 
-if (( failures > 0 )); then
-  echo "basemap steps: $failures check(s) failed"
-  exit 1
-fi
-echo "basemap steps: all checks passed"
+finish "basemap steps"
