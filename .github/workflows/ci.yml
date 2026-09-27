@@ -72,6 +72,14 @@ jobs:
           RADAR_REQUIRE_QS: "1"
         run: ./test/first-run.sh
 
+      # The lightning watch with the map closed: a fake feed on PATH reports
+      # strikes around home, and the notifications sent are read back.
+      - name: Lightning alerts give distance and direction, once per storm
+        env:
+          QT_QPA_PLATFORM: offscreen
+          RADAR_REQUIRE_QS: "1"
+        run: ./test/lightning-alert.sh
+
       # The ground is decoded on the thread that draws the shell, in steps. This
       # watches that thread while the real service decodes the shipped file,
       # and fails on a stall — which is what a decoder reverted to one call

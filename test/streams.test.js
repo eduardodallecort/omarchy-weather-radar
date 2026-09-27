@@ -27,11 +27,16 @@ const PROCESSES = [
   { id: "manifestProc", file: "Service.qml", collects: true, builder: "manifestCommand" },
   { id: "forecastProc", file: "Service.qml", collects: true, builder: "forecastCommand" },
   { id: "notifyProc", file: "Service.qml", collects: false, builder: null },
+  { id: "lightningNotifyProc", file: "Service.qml", collects: false, builder: null },
   // The radar tiles go to disk, not into the process. What is collected is
   // curl's own report, a line per tile in a format and with paths this plugin
   // chose, so its size is set here rather than by the server.
   { id: "tileFetchProc", file: "Service.qml", collects: true, builder: "TileCache.fetchCommand" },
   { id: "tileCleanProc", file: "Service.qml", collects: false, builder: "TileCache.cleanCommand" },
+  // Read a line at a time rather than collected whole: each line is one
+  // strike of a few dozen bytes, written by tools/lightning-feed.py, and the
+  // service keeps a bounded number of them (lightningMaxStrikes).
+  { id: "lightningProc", file: "Service.qml", collects: false, builder: null },
   { id: "geocodeProc", file: "Panel.qml", collects: true, builder: "geocodingCommand" },
   { id: "locationSaveProc", file: "Panel.qml", collects: false, builder: null },
 ]

@@ -7,6 +7,7 @@ import "lib/Basemap.js" as Basemap
 import "lib/RadarModel.js" as RadarModel
 import "lib/Settings.js" as Settings
 import "lib/TileCache.js" as TileCache
+import "lib/TileMath.js" as TileMath
 
 // Headless singleton behind the radar plugin.
 //
@@ -1430,6 +1431,234 @@ Item {
     } else if (hasLocation) {
       checkNow()
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Lightning
+  // ---------------------------------------------------------------------------
+  //
+  // Strikes from the Blitzortung.org network, streamed by tools/lightning-feed.py
+  // only while a map that shows them is open. The feed is worldwide, so each
+  // strike is kept only if it lands within reach of where the map is looking,
+  // and only for as long as it is worth drawing.
+
+  readonly property int lightningWindowMs: 20 * 60 * 1000
+  readonly property int lightningReachKm: 3000
+  readonly property int lightningMaxStrikes: 6000
+
+  property int lightningConsumers: 0
+  property real lightningCenterLatitude: 0
+  property real lightningCenterLongitude: 0
+
+  // Held as a plain array and republished on a beat, not per strike: a busy
+  // afternoon is dozens a second, and every publish repaints the map.
+  property var strikes: []
+  property int strikeRevision: 0
+  property var pendingStrikes: []
+  property real lastStrikeAt: 0
+
+  readonly property string lightningFeedPath: {
+    var url = String(Qt.resolvedUrl("tools/lightning-feed.py"))
+    return url.indexOf("file://") === 0 ? decodeURIComponent(url.slice(7)) : url
+  }
+
+  // The feed runs for an open map, or for the lightning watch, which needs it
+  // with the map closed.
+  readonly property bool lightningAlertsEnabled: Settings.lightningAlertsEnabled(settings)
+  readonly property int lightningAlertRadiusMiles: Settings.lightningAlertRadiusMiles(settings)
+  readonly property real lightningAlertRadiusKm: lightningAlertRadiusMiles * Settings.KM_PER_MILE
+  readonly property bool lightningWatching: settingsReady && lightningAlertsEnabled && hasLocation
+  readonly property bool lightningFeedWanted: lightningConsumers > 0 || lightningWatching
+
+  onLightningFeedWantedChanged: {
+    if (lightningFeedWanted) {
+      lightningProc.running = true
+    } else {
+      lightningRestart.stop()
+      lightningProc.running = false
+    }
+  }
+
+  onLightningWatchingChanged: resetLightningWatch()
+  onLightningAlertRadiusMilesChanged: resetLightningWatch()
+  // A new home is a new watch: strikes counted, and the quiet period after a
+  // notification, belong to the old one.
+  onLocationKeyChanged: resetLightningWatch()
+
+  function resetLightningWatch() {
+    nearbyStrikes = []
+    nearestStrike = null
+    lastLightningNotifyAt = 0
+    lastLightningNotifyKm = 0
+  }
+
+  function acquireLightning() {
+    lightningConsumers += 1
+  }
+
+  function releaseLightning() {
+    lightningConsumers = Math.max(0, lightningConsumers - 1)
+    if (lightningConsumers > 0) return
+    pendingStrikes = []
+    strikes = []
+    strikeRevision += 1
+  }
+
+  function setLightningCenter(latitude, longitude) {
+    lightningCenterLatitude = latitude
+    lightningCenterLongitude = longitude
+  }
+
+  function takeStrikeLine(line) {
+    var parts = String(line).trim().split(" ")
+    if (parts.length !== 3) return
+    var lat = Number(parts[0]), lon = Number(parts[1]), t = Number(parts[2])
+    if (!isFinite(lat) || !isFinite(lon) || !isFinite(t)) return
+    if (lightningWatching) watchStrike(lat, lon, t)
+    if (lightningConsumers === 0) return
+    if (TileMath.haversineKm(lat, lon, lightningCenterLatitude, lightningCenterLongitude)
+        > lightningReachKm) return
+    pendingStrikes.push({ latitude: lat, longitude: lon, time: t })
+  }
+
+  function flushStrikes() {
+    var cutoff = Date.now() - lightningWindowMs
+    var kept = strikes.filter(function(s) { return s.time >= cutoff })
+    var fresh = pendingStrikes.filter(function(s) { return s.time >= cutoff })
+    pendingStrikes = []
+    if (fresh.length === 0 && kept.length === strikes.length) return
+    if (fresh.length > 0) lastStrikeAt = Date.now()
+    kept = kept.concat(fresh)
+    if (kept.length > lightningMaxStrikes) kept = kept.slice(kept.length - lightningMaxStrikes)
+    strikes = kept
+    strikeRevision += 1
+  }
+
+  Timer {
+    interval: 1000
+    repeat: true
+    running: root.lightningConsumers > 0
+    onTriggered: root.flushStrikes()
+  }
+
+  // ---- Lightning watch ------------------------------------------------------
+  //
+  // A strike inside the radius notifies at once, with its distance and
+  // direction from home. After that the watch stays quiet for a while, since a
+  // storm overhead strikes many times a minute, unless a strike lands clearly
+  // closer than the one last reported.
+
+  readonly property int lightningQuietMs: 10 * 60 * 1000
+  readonly property int lightningCountWindowMs: 15 * 60 * 1000
+  // Strikes older than this when they arrive are history, not news.
+  readonly property int lightningStaleMs: 3 * 60 * 1000
+
+  property var nearbyStrikes: []
+  property var nearestStrike: null
+  property real lastLightningNotifyAt: 0
+  property real lastLightningNotifyKm: 0
+
+  // Ticks while watching so the count drops as strikes age out, not only
+  // when a new one arrives.
+  property real lightningClock: Date.now()
+  Timer {
+    interval: 30000
+    repeat: true
+    running: root.lightningWatching
+    onTriggered: root.lightningClock = Date.now()
+  }
+
+  readonly property int nearbyStrikeCount: {
+    var cutoff = lightningClock - lightningCountWindowMs
+    return nearbyStrikes.filter(function(s) { return s.time >= cutoff }).length
+  }
+
+  readonly property var compassNames: ({
+    N: "north", NE: "northeast", E: "east", SE: "southeast",
+    S: "south", SW: "southwest", W: "west", NW: "northwest"
+  })
+
+  function watchStrike(lat, lon, t) {
+    var now = Date.now()
+    if (now - t > lightningStaleMs) return
+    var homeLat = location.latitude, homeLon = location.longitude
+    var km = TileMath.haversineKm(homeLat, homeLon, lat, lon)
+    if (km > lightningAlertRadiusKm) return
+
+    var point = TileMath.compassPoint(TileMath.bearingDegrees(homeLat, homeLon, lat, lon))
+    var strike = { latitude: lat, longitude: lon, time: t, km: km, point: point }
+    lightningClock = now
+    var cutoff = now - lightningCountWindowMs
+    var kept = nearbyStrikes.filter(function(s) { return s.time >= cutoff })
+    kept.push(strike)
+    if (kept.length > 2000) kept = kept.slice(kept.length - 2000)
+    nearbyStrikes = kept
+    nearestStrike = strike
+
+    var quiet = lastLightningNotifyAt > 0 && now - lastLightningNotifyAt < lightningQuietMs
+    var muchCloser = km < lastLightningNotifyKm * 0.5 && lastLightningNotifyKm - km > 5
+    if (quiet && !muchCloser) return
+
+    lastLightningNotifyAt = now
+    lastLightningNotifyKm = km
+    notifyLightning(strike, kept.length)
+  }
+
+  function milesText(km) {
+    var mi = km / Settings.KM_PER_MILE
+    return mi < 1 ? "under a mile" : (Math.round(mi) + (Math.round(mi) === 1 ? " mile" : " miles"))
+  }
+
+  function notifyLightning(strike, count) {
+    var clock = Qt.formatTime(new Date(strike.time), "hh:mm")
+    var place = locationName !== "" ? Alerts.inertText(locationName) : "you"
+    var headline = "Lightning " + milesText(strike.km) + " " + strike.point
+    var body = "Strike " + milesText(strike.km) + " " + (compassNames[strike.point] || strike.point)
+      + " of " + place + " at " + clock + "."
+    if (count > 1) body += " " + count + " strikes within " + lightningAlertRadiusMiles
+      + " miles in the last 15 minutes."
+    var urgent = strike.km < 16
+    lightningNotifyProc.command = [
+      "omarchy-notification-send",
+      "--app-name", "Weather Radar",
+      "-g", Glyphs.LIGHTNING,
+      "-u", urgent ? "critical" : "normal",
+      headline,
+      body
+    ]
+    lightningNotifyProc.running = true
+  }
+
+  Process {
+    id: lightningNotifyProc
+  }
+
+  // What the panel says under the switch.
+  readonly property string lightningStatus: {
+    if (!lightningAlertsEnabled) return "off"
+    if (!hasLocation) return "set a location to watch for lightning"
+    var s = nearestStrike
+    if (!s || nearbyStrikeCount === 0)
+      return "watching " + lightningAlertRadiusMiles + " mi · no strikes nearby"
+    return nearbyStrikeCount + (nearbyStrikeCount === 1 ? " strike" : " strikes")
+      + " · latest " + milesText(s.km) + " " + s.point
+      + " at " + Qt.formatTime(new Date(s.time), "hh:mm")
+  }
+
+  Process {
+    id: lightningProc
+    command: ["python3", root.lightningFeedPath]
+    // The feed reconnects on its own; this restarts it only if it dies.
+    onExited: if (root.lightningFeedWanted) lightningRestart.restart()
+    stdout: SplitParser {
+      onRead: function(line) { root.takeStrikeLine(line) }
+    }
+  }
+
+  Timer {
+    id: lightningRestart
+    interval: 15000
+    onTriggered: if (root.lightningFeedWanted) lightningProc.running = true
   }
 
   // ---------------------------------------------------------------------------

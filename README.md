@@ -438,9 +438,41 @@ Every alert carries both a relative and an absolute time — "in about 2h, aroun
 21:15" — because the relative half is what the eye wants on arrival and the
 absolute half is what stays true for someone reading it later.
 
+## Lightning
+
+Real-time lightning strikes from the [Blitzortung.org](https://www.blitzortung.org)
+community network are drawn over the map as crosses: white for the first
+minute, then yellow, orange and red as they age, gone after twenty minutes.
+Only strikes within 3000 km of the view are kept. Turn them off with the
+**Lightning strikes** setting.
+
+**Lightning alerts** (a switch in the panel, off by default) notify you when a
+strike lands within the lightning radius of your location (5–150 miles,
+50 by default), with its distance and compass direction:
+
+> **Lightning 20 miles NW**
+> Strike 20 miles northwest of Detroit at 14:32. 4 strikes within 50 miles in
+> the last 15 minutes.
+
+After a notification the watch stays quiet for ten minutes, unless a strike
+lands clearly closer (under half the distance last reported). Strikes under
+ten miles are sent as critical, so they stay until dismissed. The radius is
+drawn on the map as a yellow ring.
+
+The feed is read by `tools/lightning-feed.py`, which needs only Python's
+standard library. It runs while the map is open or lightning alerts are on,
+and not otherwise.
+
+Blitzortung data is provided for private, non-commercial use. The same
+caveat as the radar applies, with more force: detection depends on volunteer
+stations and a strike can be missed or placed kilometres off. Take shelter on
+thunder, not on this.
+
 ## Data sources
 
 - Radar imagery: [RainViewer](https://www.rainviewer.com) — best-effort, no SLA
+- Lightning: [Blitzortung.org](https://www.blitzortung.org) — community
+  network, private non-commercial use
 - Forecast and geocoding: [Open-Meteo](https://open-meteo.com)
 - Base map: [Natural Earth](https://www.naturalearthdata.com/) 1:10m and 1:50m,
   public domain, shipped with the plugin as `data/basemap.bin`

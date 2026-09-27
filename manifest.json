@@ -5,7 +5,7 @@
   "version": "0.3.0",
   "author": "Eduardo Dalle Cort",
   "license": "MIT",
-  "description": "Live weather radar map in the Omarchy bar, with optional storm alerts for your location.",
+  "description": "Live weather radar map with real-time lightning in the Omarchy bar, with optional storm alerts for your location.",
   "kinds": [
     "service",
     "bar-widget"
@@ -28,7 +28,10 @@
       "defaultZoom": 7,
       "smoothTiles": true,
       "showSnow": true,
-      "showLabel": false
+      "showLabel": false,
+      "showLightning": true,
+      "lightningAlertsEnabled": false,
+      "lightningAlertRadiusMiles": 50
     },
     "schema": [
       {
@@ -101,6 +104,30 @@
         "label": "Distinguish snow",
         "defaultValue": true,
         "description": "Colour snow separately from rain."
+      },
+      {
+        "key": "showLightning",
+        "type": "boolean",
+        "label": "Lightning strikes",
+        "defaultValue": true,
+        "description": "Draw real-time lightning from the Blitzortung.org network over the map, fading over twenty minutes. Streamed only while the map is open."
+      },
+      {
+        "key": "lightningAlertsEnabled",
+        "type": "boolean",
+        "label": "Lightning alerts",
+        "defaultValue": false,
+        "description": "Notify when lightning strikes within the lightning alert radius of your location, with its distance and direction. Keeps a small connection to Blitzortung.org open while on. Also toggleable from the panel."
+      },
+      {
+        "key": "lightningAlertRadiusMiles",
+        "type": "integer",
+        "label": "Lightning alert radius (miles)",
+        "min": 5,
+        "max": 150,
+        "step": 5,
+        "defaultValue": 50,
+        "description": "How close a strike has to be to notify you."
       },
       {
         "key": "showLabel",

@@ -98,6 +98,14 @@ Item {
   property bool alertsEnabled: false
   property int alertRadiusKm: 100
 
+  // Lightning strikes, each {latitude, longitude, time}, newest last. The
+  // revision changes whenever the list does.
+  property bool showLightning: true
+  property bool lightningAlertsEnabled: false
+  property real lightningAlertRadiusKm: 80
+  property var strikes: []
+  property int strikeRevision: 0
+
   // Shown until the first manifest arrives, so an empty map during the first
   // second does not read as "no rain".
   property bool loading: false
@@ -187,6 +195,17 @@ Item {
       }
     }
 
+    // ---- Lightning -------------------------------------------------------
+    LightningLayer {
+      anchors.fill: parent
+      visible: root.showLightning
+      strikes: root.strikes
+      strikeRevision: root.strikeRevision
+      centerLatitude: root.centerLatitude
+      centerLongitude: root.centerLongitude
+      zoom: root.zoom
+    }
+
     // ---- Alert rings and home marker ------------------------------------
     Item {
       id: homeOverlay
@@ -225,6 +244,21 @@ Item {
           border.width: 1
           visible: root.alertsEnabled && r > 6 && r < homeOverlay.width * 2
         }
+      }
+
+      // The lightning watch's reach, in the colour of a fresh strike.
+      Rectangle {
+        readonly property real r: TileMath.kmToPixels(
+          root.lightningAlertRadiusKm, root.homeLatitude, root.zoom)
+        x: homeOverlay.home.x - r
+        y: homeOverlay.home.y - r
+        width: r * 2
+        height: r * 2
+        radius: r
+        color: "transparent"
+        border.color: Qt.rgba(1, 0.88, 0.3, 0.6)
+        border.width: 1
+        visible: root.lightningAlertsEnabled && r > 6 && r < homeOverlay.width * 2
       }
 
       Rectangle {
